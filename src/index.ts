@@ -18,6 +18,9 @@ import {
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
   STORE_DIR,
+  TELEGRAM_BOT_POOL,
+  TELEGRAM_BOT_TOKEN,
+  TELEGRAM_ONLY,
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
@@ -52,6 +55,14 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import {
+  connectTelegram,
+  initBotPool,
+  sendPoolMessage,
+  sendTelegramMessage,
+  setTelegramTyping,
+  stopTelegram,
+} from './telegram.js';
 import { NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -90,6 +101,10 @@ function translateJid(jid: string): string {
 }
 
 async function setTyping(jid: string, isTyping: boolean): Promise<void> {
+  if (jid.startsWith('tg:')) {
+    if (isTyping) await setTelegramTyping(jid);
+    return;
+  }
   try {
     await sock.sendPresenceUpdate(isTyping ? 'composing' : 'paused', jid);
   } catch (err) {
@@ -184,7 +199,7 @@ function getAvailableGroups(): AvailableGroup[] {
   const registeredJids = new Set(Object.keys(registeredGroups));
 
   return chats
-    .filter((c) => c.jid !== '__group_sync__' && c.jid.endsWith('@g.us'))
+    .filter((c) => c.jid !== '__group_sync__' && (c.jid.endsWith('@g.us') || c.jid.startsWith('tg:')))
     .map((c) => ({
       jid: c.jid,
       name: c.name,
@@ -276,7 +291,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        await sendMessage(chatJid, `${ASSISTANT_NAME}: ${text}`);
+        // Telegram bots already show their name — skip prefix for tg: chats
+        const prefix = chatJid.startsWith('tg:') ? '' : `${ASSISTANT_NAME}: `;
+        await sendMessage(chatJid, `${prefix}${text}`);
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -381,6 +398,12 @@ async function runAgent(
 }
 
 async function sendMessage(jid: string, text: string): Promise<void> {
+  // Route Telegram messages directly (no outgoing queue needed)
+  if (jid.startsWith('tg:')) {
+    await sendTelegramMessage(jid, text);
+    return;
+  }
+
   if (!waConnected) {
     outgoingQueue.push({ jid, text });
     logger.info({ jid, length: text.length, queueSize: outgoingQueue.length }, 'WA disconnected, message queued');
@@ -460,12 +483,22 @@ function startIpcWatcher(): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await sendMessage(
-                    data.chatJid,
-                    `${ASSISTANT_NAME}: ${data.text}`,
-                  );
+                  if (data.sender && data.chatJid.startsWith('tg:')) {
+                    await sendPoolMessage(
+                      data.chatJid,
+                      data.text,
+                      data.sender,
+                      sourceGroup,
+                    );
+                  } else {
+                    const prefix = data.chatJid.startsWith('tg:') ? '' : `${ASSISTANT_NAME}: `;
+                    await sendMessage(
+                      data.chatJid,
+                      `${prefix}${data.text}`,
+                    );
+                  }
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    { chatJid: data.chatJid, sourceGroup, sender: data.sender },
                     'IPC message sent',
                   );
                 } else {
@@ -1059,13 +1092,42 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    stopTelegram();
     await queue.shutdown(10000);
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  await connectWhatsApp();
+  // Start Telegram bot if configured (independent of WhatsApp)
+  if (TELEGRAM_BOT_TOKEN) {
+    await connectTelegram(TELEGRAM_BOT_TOKEN);
+  }
+  if (TELEGRAM_BOT_POOL.length > 0) {
+    await initBotPool(TELEGRAM_BOT_POOL);
+  }
+
+  if (!TELEGRAM_ONLY) {
+    await connectWhatsApp();
+  } else {
+    // Telegram-only mode: start all services that WhatsApp's connection.open normally starts
+    startSchedulerLoop({
+      registeredGroups: () => registeredGroups,
+      getSessions: () => sessions,
+      queue,
+      onProcess: (groupJid, proc, containerName, groupFolder) =>
+        queue.registerProcess(groupJid, proc, containerName, groupFolder),
+      sendMessage,
+      assistantName: ASSISTANT_NAME,
+    });
+    startIpcWatcher();
+    queue.setProcessMessagesFn(processGroupMessages);
+    recoverPendingMessages();
+    startMessageLoop();
+    logger.info(
+      `NanoClaw running (Telegram-only, trigger: @${ASSISTANT_NAME})`,
+    );
+  }
 }
 
 main().catch((err) => {
