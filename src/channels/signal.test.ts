@@ -104,7 +104,8 @@ function createTestOpts(
         trigger: '@Andy',
         added_at: '2024-01-01T00:00:00.000Z',
       },
-      'sig:groupABC123': {
+      // groupId 'groupABC123' → base64 'Z3JvdXBBQkMxMjM=' → JID 'sig:group.Z3JvdXBBQkMxMjM='
+      'sig:group.Z3JvdXBBQkMxMjM=': {
         name: 'Team Chat',
         folder: 'team',
         trigger: '@Andy',
@@ -145,6 +146,8 @@ function makeEnvelope(overrides: {
   groupId?: string;
   groupName?: string;
   attachments?: any[];
+  quote?: { id: number; author: string; text: string };
+  mentions?: { start: number; length: number; number: string; uuid?: string }[];
 }) {
   const dataMessage: any = {
     timestamp: overrides.timestamp ?? Date.now(),
@@ -159,11 +162,39 @@ function makeEnvelope(overrides: {
   if (overrides.attachments) {
     dataMessage.attachments = overrides.attachments;
   }
+  if (overrides.quote) {
+    dataMessage.quote = overrides.quote;
+  }
+  if (overrides.mentions) {
+    dataMessage.mentions = overrides.mentions;
+  }
   return {
     envelope: {
       source: overrides.source ?? '+15559990000',
       sourceName: overrides.sourceName ?? 'Alice',
       dataMessage,
+    },
+  };
+}
+
+function makeReactionEnvelope(overrides: {
+  source?: string;
+  sourceName?: string;
+  emoji: string;
+  targetAuthor: string;
+  targetSentTimestamp: number;
+  isRemove?: boolean;
+}) {
+  return {
+    envelope: {
+      source: overrides.source ?? '+15559990000',
+      sourceName: overrides.sourceName ?? 'Alice',
+      reactionMessage: {
+        emoji: overrides.emoji,
+        targetAuthor: overrides.targetAuthor,
+        targetSentTimestamp: overrides.targetSentTimestamp,
+        isRemove: overrides.isRemove ?? false,
+      },
     },
   };
 }
@@ -439,16 +470,16 @@ describe('SignalChannel', () => {
       );
 
       expect(opts.onChatMetadata).toHaveBeenCalledWith(
-        'sig:groupABC123',
+        'sig:group.Z3JvdXBBQkMxMjM=',
         expect.any(String),
         'Team Chat',
         'signal',
         true,
       );
       expect(opts.onMessage).toHaveBeenCalledWith(
-        'sig:groupABC123',
+        'sig:group.Z3JvdXBBQkMxMjM=',
         expect.objectContaining({
-          chat_jid: 'sig:groupABC123',
+          chat_jid: 'sig:group.Z3JvdXBBQkMxMjM=',
           sender: '+15559990000',
           content: 'Group hello',
         }),
@@ -567,7 +598,7 @@ describe('SignalChannel', () => {
         'http://localhost:8080/v2/send',
         expect.objectContaining({
           method: 'POST',
-          body: expect.stringContaining('sig:groupABC123'),
+          body: expect.stringContaining('sig:group.Z3JvdXBBQkMxMjM='),
         }),
       );
       expect(opts.onMessage).not.toHaveBeenCalled();
@@ -773,7 +804,7 @@ describe('SignalChannel', () => {
       expect(body.message).toBe('Hello');
     });
 
-    it('sends group message with group field', async () => {
+    it('sends group message with recipients array', async () => {
       const opts = createTestOpts();
       const channel = new SignalChannel(
         'http://localhost:8080',
@@ -783,14 +814,14 @@ describe('SignalChannel', () => {
       await connectChannel(channel);
 
       mockFetch.mockResolvedValueOnce({ ok: true });
-      await channel.sendMessage('sig:groupABC123', 'Group msg');
+      await channel.sendMessage('sig:group.Z3JvdXBBQkMxMjM=', 'Group msg');
 
       const sendCall = mockFetch.mock.calls.find(
         (c: any) => c[0] === 'http://localhost:8080/v2/send',
       ) as any;
       const body = JSON.parse(sendCall[1].body);
-      expect(body.group).toBe('groupABC123');
-      expect(body.recipients).toEqual([]);
+      expect(body.recipients).toEqual(['group.Z3JvdXBBQkMxMjM=']);
+      expect(body.message).toBe('Group msg');
     });
 
     it('splits messages exceeding 4000 characters', async () => {
@@ -913,7 +944,7 @@ describe('SignalChannel', () => {
       await connectChannel(channel);
 
       mockFetch.mockResolvedValueOnce({ ok: true });
-      await channel.setTyping('sig:groupABC123', true);
+      await channel.setTyping('sig:group.Z3JvdXBBQkMxMjM=', true);
 
       const typingCall = mockFetch.mock.calls.find(
         (c: any) =>
@@ -959,7 +990,7 @@ describe('SignalChannel', () => {
         '+15551234567',
         createTestOpts(),
       );
-      expect(channel.ownsJid('sig:groupABC123')).toBe(true);
+      expect(channel.ownsJid('sig:group.Z3JvdXBBQkMxMjM=')).toBe(true);
     });
 
     it('does not own tg: JIDs', () => {
@@ -1065,6 +1096,375 @@ describe('SignalChannel', () => {
       expect(mockFetch).toHaveBeenCalledWith(
         'http://localhost:8080/v1/about',
       );
+    });
+  });
+
+  // --- Quoted messages ---
+
+  describe('quoted messages', () => {
+    it('prepends quote context to message content', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          sourceName: 'Alice',
+          message: 'What about this?',
+          quote: {
+            id: 1771853168333,
+            author: '+15550001111',
+            text: 'Original message text',
+          },
+        }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: '[Replying to +15550001111: "Original message text"]\nWhat about this?',
+          is_reply_to_bot: false,
+        }),
+      );
+    });
+
+    it('sets is_reply_to_bot when quoting bot message', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567', // bot's phone number
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          sourceName: 'Alice',
+          message: 'Tell me more',
+          quote: {
+            id: 1771853168333,
+            author: '+15551234567', // bot's number
+            text: 'Here is the info you asked for',
+          },
+        }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: '[Replying to Andy: "Here is the info you asked for"]\nTell me more',
+          is_reply_to_bot: true,
+        }),
+      );
+    });
+
+    it('does not set is_reply_to_bot when quoting non-bot message', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: 'Interesting',
+          quote: {
+            id: 1771853168333,
+            author: '+15550009999',
+            text: 'Something else said',
+          },
+        }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          is_reply_to_bot: false,
+        }),
+      );
+    });
+
+    it('truncates quoted text longer than 200 chars', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      const longText = 'x'.repeat(250);
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: 'Reply',
+          quote: {
+            id: 1771853168333,
+            author: '+15550001111',
+            text: longText,
+          },
+        }),
+      );
+
+      const call = (opts.onMessage as any).mock.calls[0];
+      const content = call[1].content as string;
+      expect(content).toContain('x'.repeat(200) + '...');
+      expect(content).not.toContain('x'.repeat(201));
+    });
+
+    it('handles quote with no text gracefully', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: 'Replying to something',
+          quote: {
+            id: 1771853168333,
+            author: '+15551234567',
+            text: '',
+          },
+        }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: 'Replying to something',
+          is_reply_to_bot: true,
+        }),
+      );
+    });
+  });
+
+  // --- Emoji reactions ---
+
+  describe('emoji reactions', () => {
+    it('stores reaction as [Reacted emoji] message', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeReactionEnvelope({
+          source: '+15559990000',
+          sourceName: 'Alice',
+          emoji: '👍',
+          targetAuthor: '+15550009999',
+          targetSentTimestamp: 1771853168333,
+        }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: '[Reacted 👍]',
+          sender: '+15559990000',
+          sender_name: 'Alice',
+        }),
+      );
+    });
+
+    it('ignores reaction removals', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeReactionEnvelope({
+          source: '+15559990000',
+          emoji: '👍',
+          targetAuthor: '+15551234567',
+          targetSentTimestamp: 1771853168333,
+          isRemove: true,
+        }),
+      );
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not set is_reply_to_bot for reactions', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeReactionEnvelope({
+          source: '+15559990000',
+          emoji: '✅',
+          targetAuthor: '+15551234567', // reaction to bot's message
+          targetSentTimestamp: 1771853168333,
+        }),
+      );
+
+      const call = (opts.onMessage as any).mock.calls[0];
+      expect(call[1].is_reply_to_bot).toBeFalsy();
+    });
+  });
+
+  // --- @mentions ---
+
+  describe('@mentions', () => {
+    it('replaces mention placeholder with bot name and sets is_reply_to_bot', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          sourceName: 'Alice',
+          message: '\uFFFC test',
+          mentions: [
+            { start: 0, length: 1, number: '+15551234567', uuid: 'bot-uuid' },
+          ],
+        }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: '@Andy test',
+          is_reply_to_bot: true,
+        }),
+      );
+    });
+
+    it('replaces non-bot mention with phone number', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          sourceName: 'Alice',
+          message: '\uFFFC check this',
+          mentions: [
+            { start: 0, length: 1, number: '+15550009999' },
+          ],
+        }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: '@+15550009999 check this',
+          is_reply_to_bot: false,
+        }),
+      );
+    });
+
+    it('handles multiple mentions in one message', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: '\uFFFC and \uFFFC what do you think?',
+          mentions: [
+            { start: 0, length: 1, number: '+15550009999' },
+            { start: 6, length: 1, number: '+15551234567' },
+          ],
+        }),
+      );
+
+      const call = (opts.onMessage as any).mock.calls[0];
+      expect(call[1].content).toBe('@+15550009999 and @Andy what do you think?');
+      expect(call[1].is_reply_to_bot).toBe(true);
+    });
+  });
+
+  // --- sendReaction ---
+
+  describe('sendReaction', () => {
+    it('sends reaction via POST to /v1/reactions/{number}', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      await connectChannel(channel);
+
+      mockFetch.mockResolvedValueOnce({ ok: true });
+      await channel.sendReaction(
+        'sig:+15559990000',
+        '✅',
+        1771853168333,
+        '+15559990000',
+      );
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:8080/v1/reactions/+15551234567',
+        expect.objectContaining({ method: 'POST' }),
+      );
+
+      const reactionCall = mockFetch.mock.calls.find(
+        (c: any) => typeof c[0] === 'string' && c[0].includes('/v1/reactions/'),
+      ) as any;
+      const body = JSON.parse(reactionCall[1].body);
+      expect(body.reaction).toBe('✅');
+      expect(body.target_author).toBe('+15559990000');
+      expect(body.timestamp).toBe(1771853168333);
+      expect(body.recipient).toBe('+15559990000');
+    });
+
+    it('handles reaction send failure gracefully', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      await connectChannel(channel);
+
+      mockFetch.mockRejectedValueOnce(new Error('Network error'));
+
+      await expect(
+        channel.sendReaction('sig:+15559990000', '👍', 12345, '+15559990000'),
+      ).resolves.toBeUndefined();
     });
   });
 });

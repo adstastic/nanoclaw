@@ -12,6 +12,7 @@ import {
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_ONLY,
   TRIGGER_PATTERN,
+  groupTriggerPattern,
 } from './config.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import { TelegramChannel } from './channels/telegram.js';
@@ -140,8 +141,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
+    const pattern = groupTriggerPattern(group.trigger);
     const hasTrigger = missedMessages.some((m) =>
-      TRIGGER_PATTERN.test(m.content.trim()),
+      pattern.test(m.content.trim()) || m.is_reply_to_bot,
     );
     if (!hasTrigger) return true;
   }
@@ -159,6 +161,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     { group: group.name, messageCount: missedMessages.length },
     'Processing messages',
   );
+
+  // For Signal: react with ⚡ and set reply target for quote-reply
+  const lastMsg = missedMessages[missedMessages.length - 1];
+  if (chatJid.startsWith('sig:') && 'sendReaction' in channel) {
+    const dashIdx = lastMsg.id.indexOf('-');
+    if (dashIdx > 0) {
+      const targetTimestamp = parseInt(lastMsg.id.slice(0, dashIdx), 10);
+      const targetAuthor = lastMsg.id.slice(dashIdx + 1);
+      (channel as any).sendReaction(chatJid, '⚡', targetTimestamp, targetAuthor).catch(() => {});
+    }
+    // Set reply target so the first response quotes the triggering message
+    if ('setReplyTarget' in channel) {
+      (channel as any).setReplyTarget(chatJid, lastMsg.id);
+    }
+  }
 
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -340,8 +357,9 @@ async function startMessageLoop(): Promise<void> {
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
+            const pattern = groupTriggerPattern(group.trigger);
             const hasTrigger = groupMessages.some((m) =>
-              TRIGGER_PATTERN.test(m.content.trim()),
+              pattern.test(m.content.trim()) || m.is_reply_to_bot,
             );
             if (!hasTrigger) continue;
           }
@@ -461,6 +479,14 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
+    },
+    sendReaction: (jid, emoji, targetTimestamp, targetAuthor) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if ('sendReaction' in channel && typeof (channel as any).sendReaction === 'function') {
+        return (channel as any).sendReaction(jid, emoji, targetTimestamp, targetAuthor);
+      }
+      return Promise.resolve(); // Channel doesn't support reactions
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

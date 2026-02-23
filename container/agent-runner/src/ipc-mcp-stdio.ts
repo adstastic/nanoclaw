@@ -63,6 +63,29 @@ server.tool(
 );
 
 server.tool(
+  'send_reaction',
+  'React to a specific message with an emoji. Use the message id from the conversation to identify which message to react to. Common reactions: ✅ (done/acknowledged), 👍 (agreed), ❤️ (love), 😂 (funny). Only works on Signal messages.',
+  {
+    emoji: z.string().describe('The emoji to react with (e.g., "✅", "👍")'),
+    message_id: z.string().describe('The message id from the conversation XML (e.g., "1771853168333-+15559990000")'),
+  },
+  async (args) => {
+    const data = {
+      type: 'reaction',
+      chatJid,
+      emoji: args.emoji,
+      messageId: args.message_id,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: `Reaction ${args.emoji} sent.` }] };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools.
 

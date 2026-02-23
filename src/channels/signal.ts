@@ -23,6 +23,7 @@ export class SignalChannel implements Channel {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connected = false;
   private shouldReconnect = true;
+  private replyTargets = new Map<string, { timestamp: number; author: string }>();
 
   constructor(apiUrl: string, phoneNumber: string, opts: SignalChannelOpts) {
     this.apiUrl = apiUrl.replace(/\/$/, ''); // strip trailing slash
@@ -69,6 +70,7 @@ export class SignalChannel implements Channel {
       this.ws.addEventListener('message', (event) => {
         try {
           const data = typeof event.data === 'string' ? event.data : String(event.data);
+          logger.debug({ raw: data.slice(0, 500) }, 'Signal WS raw message');
           this.handleMessage(JSON.parse(data));
         } catch (err) {
           logger.error({ err }, 'Failed to parse Signal WebSocket message');
@@ -123,11 +125,64 @@ export class SignalChannel implements Channel {
     // Filter self-messages
     if (sender === this.phoneNumber) return;
 
+    const senderName = msg.sourceName || sender;
+
+    // --- Handle emoji reactions ---
+    const reaction = msg.reactionMessage;
+    if (reaction) {
+      if (reaction.isRemove) return; // Ignore reaction removals
+
+      // Reactions don't carry groupInfo directly — use targetAuthor to route
+      // We need a chat JID. Reactions in groups arrive with a groupInfo on the envelope.
+      const groupInfo = msg.dataMessage?.groupInfo;
+      const isGroup = !!groupInfo;
+      let chatJid: string;
+      let chatName: string;
+
+      if (isGroup) {
+        const stableGroupId = `group.${Buffer.from(groupInfo.groupId).toString('base64')}`;
+        chatJid = `sig:${stableGroupId}`;
+        chatName = groupInfo.groupName || chatJid;
+      } else {
+        chatJid = `sig:${sender}`;
+        chatName = senderName;
+      }
+
+      const timestamp = new Date(reaction.targetSentTimestamp || Date.now()).toISOString();
+      const content = `[Reacted ${reaction.emoji}]`;
+
+      this.opts.onChatMetadata(chatJid, timestamp, chatName, 'signal', isGroup);
+
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) {
+        logger.debug({ chatJid, chatName }, 'Reaction from unregistered Signal chat');
+        return;
+      }
+
+      const msgId = `reaction-${reaction.targetSentTimestamp}-${sender}`;
+
+      this.opts.onMessage(chatJid, {
+        id: msgId,
+        chat_jid: chatJid,
+        sender,
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+      });
+
+      logger.info(
+        { chatJid, chatName, sender: senderName, emoji: reaction.emoji },
+        'Signal reaction stored',
+      );
+      return;
+    }
+
+    // --- Handle regular messages ---
     const dataMessage = msg.dataMessage;
     if (!dataMessage) return;
 
     const timestamp = new Date(dataMessage.timestamp).toISOString();
-    const senderName = msg.sourceName || sender;
 
     // Determine chat JID
     const groupInfo = dataMessage.groupInfo;
@@ -136,15 +191,52 @@ export class SignalChannel implements Channel {
     let chatName: string;
 
     if (isGroup) {
-      chatJid = `sig:${groupInfo.groupId}`;
+      // signal-cli gives groupId as raw base64. The API's stable ID is group. + base64(groupId).
+      const stableGroupId = `group.${Buffer.from(groupInfo.groupId).toString('base64')}`;
+      chatJid = `sig:${stableGroupId}`;
       chatName = groupInfo.groupName || chatJid;
     } else {
       chatJid = `sig:${sender}`;
       chatName = senderName;
     }
 
+    // Parse quoted message
+    let isReplyToBot = false;
+    const quote = dataMessage.quote;
+    if (quote) {
+      isReplyToBot = quote.author === this.phoneNumber;
+      if (quote.text) {
+        const quotedName = quote.author === this.phoneNumber
+          ? ASSISTANT_NAME
+          : quote.author;
+        const truncated = quote.text.length > 200
+          ? quote.text.slice(0, 200) + '...'
+          : quote.text;
+        const quoteLine = `[Replying to ${quotedName}: "${truncated}"]`;
+        // Prepend quote context — will be joined with message content below
+        dataMessage._quotePrefix = quoteLine;
+      }
+    }
+
+    // Handle @mentions — Signal uses \uFFFC placeholder chars in message text
+    const mentions: any[] = dataMessage.mentions || [];
+    let messageText = dataMessage.message || '';
+    if (mentions.length > 0) {
+      // Process mentions in reverse order to preserve string positions
+      const sorted = [...mentions].sort((a, b) => b.start - a.start);
+      for (const mention of sorted) {
+        const isBotMention = mention.number === this.phoneNumber;
+        if (isBotMention) isReplyToBot = true;
+        const name = isBotMention ? `@${ASSISTANT_NAME}` : `@${mention.number}`;
+        messageText =
+          messageText.slice(0, mention.start) +
+          name +
+          messageText.slice(mention.start + mention.length);
+      }
+    }
+
     // Build content from text + attachments
-    let content = dataMessage.message || '';
+    let content = messageText;
     const attachments: any[] = dataMessage.attachments || [];
     for (const att of attachments) {
       const type = (att.contentType || '').split('/')[0];
@@ -164,6 +256,13 @@ export class SignalChannel implements Channel {
           break;
       }
       content = content ? `${content} ${placeholder}` : placeholder;
+    }
+
+    // Prepend quote context if present
+    if (dataMessage._quotePrefix) {
+      content = content
+        ? `${dataMessage._quotePrefix}\n${content}`
+        : dataMessage._quotePrefix;
     }
 
     if (!content) return;
@@ -200,6 +299,7 @@ export class SignalChannel implements Channel {
       content,
       timestamp,
       is_from_me: false,
+      is_reply_to_bot: isReplyToBot,
     });
 
     logger.info(
@@ -216,8 +316,24 @@ export class SignalChannel implements Channel {
     }
   }
 
+  /** Set a reply target so the next sendMessage for this JID is a quote-reply. */
+  setReplyTarget(jid: string, messageId: string): void {
+    const dashIdx = messageId.indexOf('-');
+    if (dashIdx > 0) {
+      const timestamp = parseInt(messageId.slice(0, dashIdx), 10);
+      const author = messageId.slice(dashIdx + 1);
+      if (!isNaN(timestamp)) {
+        this.replyTargets.set(jid, { timestamp, author });
+      }
+    }
+  }
+
   async sendMessage(jid: string, text: string): Promise<void> {
     const MAX_LENGTH = 4000;
+
+    // Consume reply target on first chunk only
+    const replyTarget = this.replyTargets.get(jid);
+    if (replyTarget) this.replyTargets.delete(jid);
 
     try {
       const chunks: string[] = [];
@@ -229,23 +345,22 @@ export class SignalChannel implements Channel {
         }
       }
 
-      for (const chunk of chunks) {
+      for (let i = 0; i < chunks.length; i++) {
         const body: any = {
-          message: chunk,
+          message: chunks[i],
           number: this.phoneNumber,
           text_mode: 'normal',
         };
 
-        // Groups use group ID, DMs use recipients array
-        const stripped = jid.replace(/^sig:/, '');
-        if (stripped.startsWith('+')) {
-          // DM — recipient is a phone number
-          body.recipients = [stripped];
-        } else {
-          // Group — send to group ID
-          body.recipients = [];
-          body.group = stripped;
+        // Quote-reply on the first chunk only
+        if (i === 0 && replyTarget) {
+          body.quote_timestamp = replyTarget.timestamp;
+          body.quote_author = replyTarget.author;
         }
+
+        // Both DMs and groups use the recipients array
+        const stripped = jid.replace(/^sig:/, '');
+        body.recipients = [stripped];
 
         const res = await fetch(`${this.apiUrl}/v2/send`, {
           method: 'POST',
@@ -264,6 +379,46 @@ export class SignalChannel implements Channel {
     }
   }
 
+  async sendReaction(
+    jid: string,
+    emoji: string,
+    targetTimestamp: number,
+    targetAuthor: string,
+  ): Promise<void> {
+    try {
+      const stripped = jid.replace(/^sig:/, '');
+      const body: any = {
+        reaction: emoji,
+        target_author: targetAuthor,
+        timestamp: targetTimestamp,
+      };
+
+      if (stripped.startsWith('+')) {
+        body.recipient = stripped;
+      } else {
+        // Group — use recipients array
+        body.recipient = stripped;
+      }
+
+      const res = await fetch(
+        `${this.apiUrl}/v1/reactions/${this.phoneNumber}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      );
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        logger.error({ jid, status: res.status, detail }, 'Signal reaction send failed');
+      } else {
+        logger.info({ jid, emoji, targetTimestamp }, 'Signal reaction sent');
+      }
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send Signal reaction');
+    }
+  }
+
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
     try {
       const stripped = jid.replace(/^sig:/, '');
@@ -272,6 +427,9 @@ export class SignalChannel implements Channel {
       const body: any = {};
       if (stripped.startsWith('+')) {
         body.recipient = stripped;
+      } else if (stripped.startsWith('group.')) {
+        // Decode group.xxx back to internal ID for typing API
+        body.group = Buffer.from(stripped.slice('group.'.length), 'base64').toString('utf-8');
       } else {
         body.group = stripped;
       }

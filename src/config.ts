@@ -66,6 +66,11 @@ export const TRIGGER_PATTERN = new RegExp(
   'i',
 );
 
+/** Build a trigger regex from a group's trigger string (e.g. "@g" → /^@g\b/i). */
+export function groupTriggerPattern(trigger: string): RegExp {
+  return new RegExp(`^${escapeRegex(trigger)}\\b`, 'i');
+}
+
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses system timezone by default
 export const TIMEZONE =

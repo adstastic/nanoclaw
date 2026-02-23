@@ -17,6 +17,7 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendReaction?: (jid: string, emoji: string, targetTimestamp: number, targetAuthor: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroupMetadata: (force: boolean) => Promise<void>;
@@ -89,6 +90,31 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
                   );
+                }
+              } else if (data.type === 'reaction' && data.chatJid && data.emoji && data.messageId && deps.sendReaction) {
+                // Parse Signal message ID: "{timestamp}-{phoneNumber}"
+                const dashIdx = (data.messageId as string).indexOf('-');
+                if (dashIdx > 0) {
+                  const targetTimestamp = parseInt((data.messageId as string).slice(0, dashIdx), 10);
+                  const targetAuthor = (data.messageId as string).slice(dashIdx + 1);
+                  const targetGroup = registeredGroups[data.chatJid];
+                  if (
+                    isMain ||
+                    (targetGroup && targetGroup.folder === sourceGroup)
+                  ) {
+                    await deps.sendReaction(data.chatJid, data.emoji as string, targetTimestamp, targetAuthor);
+                    logger.info(
+                      { chatJid: data.chatJid, emoji: data.emoji, sourceGroup },
+                      'IPC reaction sent',
+                    );
+                  } else {
+                    logger.warn(
+                      { chatJid: data.chatJid, sourceGroup },
+                      'Unauthorized IPC reaction attempt blocked',
+                    );
+                  }
+                } else {
+                  logger.warn({ messageId: data.messageId }, 'Invalid message ID for reaction');
                 }
               }
               fs.unlinkSync(filePath);
