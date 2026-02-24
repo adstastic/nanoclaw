@@ -418,7 +418,7 @@ function recoverPendingMessages(): void {
 
 
 async function main(): Promise<void> {
-  ensureContainerRuntimeRunning();
+  await ensureContainerRuntimeRunning();
   cleanupOrphans();
   initDatabase();
   logger.info('Database initialized');
