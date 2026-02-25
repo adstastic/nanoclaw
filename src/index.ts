@@ -46,6 +46,7 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { cleanupOrphans, ensureContainerRuntimeRunning } from './container-runtime.js';
 import { logger } from './logger.js';
+import { responseEmitter, startApiServer } from './api.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -205,7 +206,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
+        // Route response to whoever is listening: API caller or channel
+        if (responseEmitter.listenerCount(`response:${chatJid}`) > 0) {
+          responseEmitter.emit(`response:${chatJid}`, text);
+        } else {
+          await channel.sendMessage(chatJid, text);
+        }
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -483,6 +489,12 @@ async function main(): Promise<void> {
     channels.push(signal);
     await signal.connect();
   }
+
+  // HTTP API (only starts if API_KEY is set)
+  startApiServer({
+    queue,
+    registeredGroups: () => registeredGroups,
+  });
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({

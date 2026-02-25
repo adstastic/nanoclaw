@@ -12,6 +12,9 @@ const envConfig = readEnvFile([
   'TELEGRAM_ONLY',
   'SIGNAL_API_URL',
   'SIGNAL_PHONE_NUMBER',
+  'API_KEY',
+  'API_PORT',
+  'API_GROUP_FOLDER',
 ]);
 
 export const ASSISTANT_NAME =
@@ -35,7 +38,7 @@ export const MOUNT_ALLOWLIST_PATH = path.join(
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
-export const MAIN_GROUP_FOLDER = 'personal';
+export const MAIN_GROUP_FOLDER = '_admin';
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
@@ -87,3 +90,13 @@ export const SIGNAL_API_URL =
   process.env.SIGNAL_API_URL || envConfig.SIGNAL_API_URL || 'http://localhost:8080';
 export const SIGNAL_PHONE_NUMBER =
   process.env.SIGNAL_PHONE_NUMBER || envConfig.SIGNAL_PHONE_NUMBER || '';
+
+// HTTP API configuration
+export const API_KEY =
+  process.env.API_KEY || envConfig.API_KEY || '';
+export const API_PORT = parseInt(
+  process.env.API_PORT || envConfig.API_PORT || '3727',
+  10,
+);
+export const API_GROUP_FOLDER =
+  process.env.API_GROUP_FOLDER || envConfig.API_GROUP_FOLDER || 'personal';

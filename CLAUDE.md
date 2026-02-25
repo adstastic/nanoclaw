@@ -20,6 +20,7 @@ Single Node.js process that connects to WhatsApp/Signal/Telegram, routes message
 | `src/container-runner.ts` | Spawns Docker containers with mounts |
 | `src/container-runtime.ts` | Docker/container runtime abstraction |
 | `src/mount-security.ts` | Validates additional mounts against allowlist |
+| `src/api.ts` | HTTP API for programmatic access (wearable, scripts) |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations (store/messages.db) |
 | `groups/{name}/CLAUDE.md` | Per-group agent instructions (versioned in git) |
@@ -57,6 +58,7 @@ Single Node.js process that connects to WhatsApp/Signal/Telegram, routes message
 - **WhatsApp**: Baileys library, QR auth, `wa:` JID prefix
 - **Signal**: signal-cli-rest-api sidecar (Docker), WebSocket for receive, REST for send, `sig:` JID prefix
 - **Telegram**: grammY bot library, `tg:` JID prefix
+- **HTTP API**: `src/api.ts`, injects messages into a group's JID for programmatic access (e.g. iOS wearable). Requires `API_KEY` in `.env`. Responses route back to the API caller, not the messaging channel.
 
 ### Signal-Specific Features
 - ⚡ reaction on triggering message when bot starts processing
