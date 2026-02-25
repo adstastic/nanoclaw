@@ -629,6 +629,10 @@ export async function runContainerAgent(
 const CONTENT_TYPE_FROM_EXT: Record<string, string> = {
   jpg: 'image/jpeg', jpeg: 'image/jpeg',
   png: 'image/png', gif: 'image/gif', webp: 'image/webp',
+  pdf: 'application/pdf',
+  txt: 'text/plain',
+  csv: 'text/csv',
+  md: 'text/markdown',
 };
 
 /**

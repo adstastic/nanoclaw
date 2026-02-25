@@ -14,6 +14,7 @@ vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
+  STORE_DIR: '/tmp/nanoclaw-test-store',
   TIMEZONE: 'America/Los_Angeles',
 }));
 
@@ -89,7 +90,7 @@ vi.mock('child_process', async () => {
 });
 
 import fs from 'fs';
-import { runContainerAgent, readSecrets, ContainerOutput } from './container-runner.js';
+import { runContainerAgent, readSecrets, prepareAttachmentsForContainer, ContainerOutput } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
 const mockedFs = vi.mocked(fs);
@@ -281,5 +282,48 @@ describe('readSecrets per-group overrides', () => {
 
     expect(secrets.GH_TOKEN).toBe('scoped');
     expect(secrets).not.toHaveProperty('RANDOM_SECRET');
+  });
+});
+
+describe('prepareAttachmentsForContainer', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('maps pdf extension to application/pdf content type', () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readdirSync.mockReturnValue(['0.pdf'] as any);
+
+    const result = prepareAttachmentsForContainer(['msg-001'], 'main');
+
+    expect(result).toEqual([
+      {
+        containerPath: '/workspace/ipc/attachments/msg-001/0.pdf',
+        contentType: 'application/pdf',
+      },
+    ]);
+  });
+
+  it('maps txt extension to text/plain content type', () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readdirSync.mockReturnValue(['0.txt'] as any);
+
+    const result = prepareAttachmentsForContainer(['msg-002'], 'main');
+
+    expect(result).toEqual([
+      {
+        containerPath: '/workspace/ipc/attachments/msg-002/0.txt',
+        contentType: 'text/plain',
+      },
+    ]);
+  });
+
+  it('falls back to application/octet-stream for unknown extensions', () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readdirSync.mockReturnValue(['0.bin'] as any);
+
+    const result = prepareAttachmentsForContainer(['msg-003'], 'main');
+
+    expect(result[0].contentType).toBe('application/octet-stream');
   });
 });
