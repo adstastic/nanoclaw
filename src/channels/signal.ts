@@ -271,7 +271,22 @@ export class SignalChannel implements Channel {
       const att = rawAttachments[i];
       const ct: string = att.contentType || '';
 
-      if (IMAGE_CONTENT_TYPES.has(ct) && att.id) {
+      // Signal sends long messages (>2000 chars) as a text/x-signal-plain attachment
+      // containing the full text — the body is truncated. Download and use the full text.
+      if (ct === 'text/x-signal-plain' && att.id) {
+        try {
+          const res = await fetch(`${this.apiUrl}/v1/attachments/${att.id}`);
+          if (res.ok) {
+            const fullText = await res.text();
+            if (fullText.length > content.length) {
+              content = fullText;
+              logger.debug({ attachmentId: att.id, length: fullText.length }, 'Long message attachment reassembled');
+            }
+          }
+        } catch (err) {
+          logger.warn({ attachmentId: att.id, err }, 'Failed to download long-message attachment');
+        }
+      } else if (IMAGE_CONTENT_TYPES.has(ct) && att.id) {
         const ext = extFromContentType(ct);
         const filename = att.filename || `image-${i}.${ext}`;
         const attachDir = path.join(STORE_DIR, 'attachments', msgId);

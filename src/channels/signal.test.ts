@@ -753,6 +753,70 @@ describe('SignalChannel', () => {
       );
     });
 
+    it('reassembles long messages from text/x-signal-plain attachment', async () => {
+      const fullText = 'A'.repeat(3000); // Longer than Signal's ~2000 char body limit
+      const truncatedBody = fullText.slice(0, 2000);
+
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      // Mock fetch for the long-message attachment download (after connect)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        text: async () => fullText,
+      });
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: truncatedBody,
+          attachments: [{ contentType: 'text/x-signal-plain', id: 'long-msg-123' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({ content: fullText }),
+      );
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:8080/v1/attachments/long-msg-123',
+      );
+    });
+
+    it('falls back to truncated body when long-message download fails', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      // Mock fetch failure for the attachment download (after connect)
+      mockFetch.mockRejectedValueOnce(new Error('Network error'));
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: 'Truncated body',
+          attachments: [{ contentType: 'text/x-signal-plain', id: 'fail-123' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      // Should still deliver the truncated body, not append [Attachment]
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({ content: 'Truncated body' }),
+      );
+    });
+
     it('ignores messages with no text and no attachments', async () => {
       const opts = createTestOpts();
       const channel = new SignalChannel(
