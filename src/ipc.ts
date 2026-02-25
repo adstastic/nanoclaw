@@ -5,6 +5,7 @@ import { CronExpressionParser } from 'cron-parser';
 
 import {
   DATA_DIR,
+  GROUPS_DIR,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
   TIMEZONE,
@@ -15,9 +16,24 @@ import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
+/**
+ * Map a container-relative path back to its host filesystem location.
+ */
+function containerToHostPath(containerPath: string, groupFolder: string): string {
+  if (containerPath.startsWith('/workspace/ipc/')) {
+    return path.join(DATA_DIR, 'ipc', groupFolder, containerPath.slice('/workspace/ipc/'.length));
+  }
+  if (containerPath.startsWith('/workspace/group/')) {
+    return path.join(GROUPS_DIR, groupFolder, containerPath.slice('/workspace/group/'.length));
+  }
+  // Additional mounts at /workspace/extra/ — these can't be reverse-mapped without mount config
+  throw new Error(`Cannot map container path to host: ${containerPath}`);
+}
+
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
   sendReaction?: (jid: string, emoji: string, targetTimestamp: number, targetAuthor: string) => Promise<void>;
+  sendImage?: (jid: string, imagePath: string, caption?: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroupMetadata: (force: boolean) => Promise<void>;
@@ -115,6 +131,38 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   }
                 } else {
                   logger.warn({ messageId: data.messageId }, 'Invalid message ID for reaction');
+                }
+              } else if (data.type === 'image' && data.chatJid && data.imagePath && deps.sendImage) {
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  try {
+                    const hostPath = containerToHostPath(data.imagePath as string, sourceGroup);
+                    if (fs.existsSync(hostPath)) {
+                      await deps.sendImage(data.chatJid, hostPath, data.caption as string | undefined);
+                      logger.info(
+                        { chatJid: data.chatJid, sourceGroup },
+                        'IPC image sent',
+                      );
+                    } else {
+                      logger.error(
+                        { imagePath: data.imagePath, hostPath, sourceGroup },
+                        'IPC image file not found on host',
+                      );
+                    }
+                  } catch (err) {
+                    logger.error(
+                      { imagePath: data.imagePath, sourceGroup, err },
+                      'Failed to map or send IPC image',
+                    );
+                  }
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC image attempt blocked',
+                  );
                 }
               }
               fs.unlinkSync(filePath);

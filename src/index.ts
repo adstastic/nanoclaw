@@ -19,6 +19,7 @@ import { TelegramChannel } from './channels/telegram.js';
 import { SignalChannel } from './channels/signal.js';
 import {
   ContainerOutput,
+  prepareAttachmentsForContainer,
   runContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
@@ -150,6 +151,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const prompt = formatMessages(missedMessages);
 
+  // Prepare image attachments for container (copies files to IPC dir)
+  const messageIds = missedMessages.map(m => m.id);
+  const attachments = prepareAttachmentsForContainer(messageIds, group.folder);
+
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
@@ -210,7 +215,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (result.status === 'error') {
       hadError = true;
     }
-  });
+  }, attachments);
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
@@ -237,6 +242,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  attachments?: { containerPath: string; contentType: string }[],
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
@@ -286,6 +292,7 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
+        attachments: attachments?.length ? attachments : undefined,
       },
       (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
@@ -375,7 +382,11 @@ async function startMessageLoop(): Promise<void> {
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend);
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          // Prepare attachments for piped messages
+          const pipeMessageIds = messagesToSend.map(m => m.id);
+          const pipeAttachments = prepareAttachmentsForContainer(pipeMessageIds, group.folder);
+
+          if (queue.sendMessage(chatJid, formatted, pipeAttachments.length > 0 ? pipeAttachments : undefined)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
@@ -383,6 +394,18 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
+
+            // Signal: react ⚡ on piped messages too
+            const pipedLastMsg = messagesToSend[messagesToSend.length - 1];
+            if (chatJid.startsWith('sig:') && 'sendReaction' in channel) {
+              const dashIdx = pipedLastMsg.id.indexOf('-');
+              if (dashIdx > 0) {
+                const ts = parseInt(pipedLastMsg.id.slice(0, dashIdx), 10);
+                const author = pipedLastMsg.id.slice(dashIdx + 1);
+                (channel as any).sendReaction(chatJid, '⚡', ts, author).catch(() => {});
+              }
+            }
+
             // Show typing indicator while the container processes the piped message
             channel.setTyping?.(chatJid, true);
           } else {
@@ -487,6 +510,12 @@ async function main(): Promise<void> {
         return (channel as any).sendReaction(jid, emoji, targetTimestamp, targetAuthor);
       }
       return Promise.resolve(); // Channel doesn't support reactions
+    },
+    sendImage: (jid, imagePath, caption) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (channel.sendImage) return channel.sendImage(jid, imagePath, caption);
+      return Promise.resolve(); // Channel doesn't support images
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

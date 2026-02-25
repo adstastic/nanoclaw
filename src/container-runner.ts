@@ -13,6 +13,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  STORE_DIR,
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -33,6 +34,7 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   secrets?: Record<string, string>;
+  attachments?: { containerPath: string; contentType: string }[];
 }
 
 export interface ContainerOutput {
@@ -143,6 +145,7 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  fs.mkdirSync(path.join(groupIpcDir, 'attachments'), { recursive: true });
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
@@ -179,9 +182,39 @@ function buildVolumeMounts(
 /**
  * Read allowed secrets from .env for passing to the container via stdin.
  * Secrets are never written to disk or mounted as files.
+ *
+ * Per-group overrides: if groups/{folder}/.env exists, its values take
+ * precedence over the global .env for the same keys. This allows scoping
+ * tokens per group (e.g., a read-only GH_TOKEN for a monitoring agent).
  */
-function readSecrets(): Record<string, string> {
-  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'GH_TOKEN']);
+export function readSecrets(groupFolder: string): Record<string, string> {
+  const keys = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'GH_TOKEN'];
+  const global = readEnvFile(keys);
+  const groupEnvFile = path.join(GROUPS_DIR, groupFolder, '.env');
+  let groupOverrides: Record<string, string> = {};
+  try {
+    const content = fs.readFileSync(groupEnvFile, 'utf-8');
+    // Reuse the same parsing logic — write a temp-free inline parse
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      if (!keys.includes(key)) continue;
+      let value = trimmed.slice(eqIdx + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      if (value) groupOverrides[key] = value;
+    }
+  } catch {
+    // No group .env — use global only
+  }
+  return { ...global, ...groupOverrides };
 }
 
 const DEFAULT_CONTAINER_MEMORY = '4GiB';
@@ -267,7 +300,7 @@ export async function runContainerAgent(
     let stderrTruncated = false;
 
     // Pass secrets via stdin (never written to disk or mounted as files)
-    input.secrets = readSecrets();
+    input.secrets = readSecrets(group.folder);
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
     // Remove secrets from input so they don't appear in logs
@@ -579,6 +612,51 @@ export async function runContainerAgent(
       });
     });
   });
+}
+
+const CONTENT_TYPE_FROM_EXT: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg',
+  png: 'image/png', gif: 'image/gif', webp: 'image/webp',
+};
+
+/**
+ * Scan store/attachments/ for files matching the given message IDs,
+ * copy them into the group's IPC attachments directory (mounted in container),
+ * and return metadata for the container input.
+ */
+export function prepareAttachmentsForContainer(
+  messageIds: string[],
+  groupFolder: string,
+): { containerPath: string; contentType: string }[] {
+  const attachmentsDir = path.join(STORE_DIR, 'attachments');
+  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+  const ipcAttachmentsDir = path.join(groupIpcDir, 'attachments');
+  const result: { containerPath: string; contentType: string }[] = [];
+
+  for (const msgId of messageIds) {
+    const msgDir = path.join(attachmentsDir, msgId);
+    if (!fs.existsSync(msgDir)) continue;
+
+    let files: string[];
+    try { files = fs.readdirSync(msgDir); } catch { continue; }
+
+    for (const file of files) {
+      if (file.startsWith('.')) continue;
+      const srcPath = path.join(msgDir, file);
+      const destDir = path.join(ipcAttachmentsDir, msgId);
+      fs.mkdirSync(destDir, { recursive: true });
+      fs.copyFileSync(srcPath, path.join(destDir, file));
+
+      const ext = path.extname(file).slice(1).toLowerCase();
+      const contentType = CONTENT_TYPE_FROM_EXT[ext] || 'application/octet-stream';
+      result.push({
+        containerPath: `/workspace/ipc/attachments/${msgId}/${file}`,
+        contentType,
+      });
+    }
+  }
+
+  return result;
 }
 
 export function writeTasksSnapshot(

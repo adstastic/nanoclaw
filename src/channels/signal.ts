@@ -1,11 +1,35 @@
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import fs from 'fs';
+import path from 'path';
+
+import { ASSISTANT_NAME, STORE_DIR, TRIGGER_PATTERN } from '../config.js';
 import { logger } from '../logger.js';
 import {
+  Attachment,
   Channel,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
+
+const IMAGE_CONTENT_TYPES = new Set([
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+]);
+
+function extFromContentType(ct: string): string {
+  const map: Record<string, string> = {
+    'image/jpeg': 'jpg', 'image/png': 'png',
+    'image/gif': 'gif', 'image/webp': 'webp',
+  };
+  return map[ct] || 'bin';
+}
+
+function contentTypeFromExt(ext: string): string {
+  const map: Record<string, string> = {
+    jpg: 'image/jpeg', jpeg: 'image/jpeg',
+    png: 'image/png', gif: 'image/gif', webp: 'image/webp',
+  };
+  return map[ext.toLowerCase()] || 'application/octet-stream';
+}
 
 export interface SignalChannelOpts {
   onMessage: OnInboundMessage;
@@ -67,11 +91,11 @@ export class SignalChannel implements Channel {
         }
       });
 
-      this.ws.addEventListener('message', (event) => {
+      this.ws.addEventListener('message', async (event) => {
         try {
           const data = typeof event.data === 'string' ? event.data : String(event.data);
           logger.debug({ raw: data.slice(0, 500) }, 'Signal WS raw message');
-          this.handleMessage(JSON.parse(data));
+          await this.handleMessage(JSON.parse(data));
         } catch (err) {
           logger.error({ err }, 'Failed to parse Signal WebSocket message');
         }
@@ -114,7 +138,7 @@ export class SignalChannel implements Channel {
     }, 5000);
   }
 
-  private handleMessage(envelope: any): void {
+  private async handleMessage(envelope: any): Promise<void> {
     // signal-cli-rest-api JSON-RPC format
     const msg = envelope?.envelope;
     if (!msg) return;
@@ -235,27 +259,48 @@ export class SignalChannel implements Channel {
       }
     }
 
+    // Compute message ID early (needed for attachment paths)
+    const msgId = `${dataMessage.timestamp}-${sender}`;
+
     // Build content from text + attachments
     let content = messageText;
-    const attachments: any[] = dataMessage.attachments || [];
-    for (const att of attachments) {
-      const type = (att.contentType || '').split('/')[0];
-      let placeholder: string;
-      switch (type) {
-        case 'image':
-          placeholder = '[Photo]';
-          break;
-        case 'video':
-          placeholder = '[Video]';
-          break;
-        case 'audio':
-          placeholder = '[Audio]';
-          break;
-        default:
-          placeholder = '[Attachment]';
-          break;
+    const rawAttachments: any[] = dataMessage.attachments || [];
+    const imageAttachments: Attachment[] = [];
+
+    for (let i = 0; i < rawAttachments.length; i++) {
+      const att = rawAttachments[i];
+      const ct: string = att.contentType || '';
+
+      if (IMAGE_CONTENT_TYPES.has(ct) && att.id) {
+        const ext = extFromContentType(ct);
+        const filename = att.filename || `image-${i}.${ext}`;
+        const attachDir = path.join(STORE_DIR, 'attachments', msgId);
+        const filePath = path.join(attachDir, `${i}.${ext}`);
+
+        const ok = await this.downloadAttachment(att.id, filePath);
+        if (ok) {
+          imageAttachments.push({ hostPath: filePath, contentType: ct, filename });
+        }
+        content = content ? `${content} [Image: ${filename}]` : `[Image: ${filename}]`;
+      } else {
+        const type = ct.split('/')[0];
+        let placeholder: string;
+        switch (type) {
+          case 'image':
+            placeholder = '[Photo]';
+            break;
+          case 'video':
+            placeholder = '[Video]';
+            break;
+          case 'audio':
+            placeholder = '[Audio]';
+            break;
+          default:
+            placeholder = '[Attachment]';
+            break;
+        }
+        content = content ? `${content} ${placeholder}` : placeholder;
       }
-      content = content ? `${content} ${placeholder}` : placeholder;
     }
 
     // Prepend quote context if present
@@ -289,8 +334,6 @@ export class SignalChannel implements Channel {
       return;
     }
 
-    const msgId = `${dataMessage.timestamp}-${sender}`;
-
     this.opts.onMessage(chatJid, {
       id: msgId,
       chat_jid: chatJid,
@@ -300,6 +343,7 @@ export class SignalChannel implements Channel {
       timestamp,
       is_from_me: false,
       is_reply_to_bot: isReplyToBot,
+      attachments: imageAttachments.length > 0 ? imageAttachments : undefined,
     });
 
     logger.info(
@@ -313,6 +357,56 @@ export class SignalChannel implements Channel {
       await this.sendMessage(chatJid, text);
     } catch (err) {
       logger.error({ chatJid, err }, 'Failed to send Signal command reply');
+    }
+  }
+
+  private async downloadAttachment(attachmentId: string, destPath: string): Promise<boolean> {
+    try {
+      const res = await fetch(`${this.apiUrl}/v1/attachments/${attachmentId}`);
+      if (!res.ok) {
+        logger.error({ attachmentId, status: res.status }, 'Failed to download Signal attachment');
+        return false;
+      }
+      const buffer = Buffer.from(await res.arrayBuffer());
+      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+      fs.writeFileSync(destPath, buffer);
+      logger.debug({ attachmentId, destPath, size: buffer.length }, 'Attachment downloaded');
+      return true;
+    } catch (err) {
+      logger.error({ attachmentId, err }, 'Error downloading Signal attachment');
+      return false;
+    }
+  }
+
+  async sendImage(jid: string, imagePath: string, caption?: string): Promise<void> {
+    try {
+      const imageData = fs.readFileSync(imagePath);
+      const base64 = imageData.toString('base64');
+      const ext = path.extname(imagePath).slice(1).toLowerCase();
+      const ct = contentTypeFromExt(ext);
+      const filename = path.basename(imagePath);
+
+      const stripped = jid.replace(/^sig:/, '');
+      const body: any = {
+        number: this.phoneNumber,
+        recipients: [stripped],
+        base64_attachments: [`data:${ct};filename=${filename};base64,${base64}`],
+      };
+      if (caption) body.message = caption;
+
+      const res = await fetch(`${this.apiUrl}/v2/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        logger.error({ jid, status: res.status, detail }, 'Signal image send failed');
+      } else {
+        logger.info({ jid, filename }, 'Signal image sent');
+      }
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send Signal image');
     }
   }
 

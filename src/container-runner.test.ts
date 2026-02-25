@@ -49,6 +49,12 @@ vi.mock('./mount-security.js', () => ({
   validateAdditionalMounts: vi.fn(() => []),
 }));
 
+// Mock env.js — controls what readSecrets sees as "global" secrets
+const mockReadEnvFile = vi.fn<(keys: string[]) => Record<string, string>>(() => ({}));
+vi.mock('./env.js', () => ({
+  readEnvFile: (keys: string[]) => mockReadEnvFile(keys),
+}));
+
 // Create a controllable fake ChildProcess
 function createFakeProcess() {
   const proc = new EventEmitter() as EventEmitter & {
@@ -81,8 +87,11 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import fs from 'fs';
+import { runContainerAgent, readSecrets, ContainerOutput } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
+
+const mockedFs = vi.mocked(fs);
 
 const testGroup: RegisteredGroup = {
   name: 'Test Group',
@@ -198,5 +207,78 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+});
+
+describe('readSecrets per-group overrides', () => {
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('group .env overrides global GH_TOKEN', () => {
+    mockReadEnvFile.mockReturnValue({
+      GH_TOKEN: 'global-token-should-not-appear',
+      ANTHROPIC_API_KEY: 'global-api-key',
+    });
+    mockedFs.readFileSync.mockReturnValue('GH_TOKEN=scoped-feedback-token\n');
+
+    const secrets = readSecrets('feedback');
+
+    expect(secrets.GH_TOKEN).toBe('scoped-feedback-token');
+    expect(secrets.ANTHROPIC_API_KEY).toBe('global-api-key');
+  });
+
+  it('global GH_TOKEN is not passed when group overrides it', () => {
+    mockReadEnvFile.mockReturnValue({
+      GH_TOKEN: 'global-token-secret',
+      ANTHROPIC_API_KEY: 'global-api-key',
+    });
+    mockedFs.readFileSync.mockReturnValue('GH_TOKEN=scoped-token\n');
+
+    const secrets = readSecrets('feedback');
+
+    expect(secrets.GH_TOKEN).not.toBe('global-token-secret');
+    expect(secrets.GH_TOKEN).toBe('scoped-token');
+  });
+
+  it('falls back to global secrets when no group .env exists', () => {
+    mockReadEnvFile.mockReturnValue({
+      GH_TOKEN: 'global-token',
+      ANTHROPIC_API_KEY: 'global-api-key',
+    });
+    mockedFs.readFileSync.mockImplementation(() => {
+      throw new Error('ENOENT');
+    });
+
+    const secrets = readSecrets('no-env-group');
+
+    expect(secrets.GH_TOKEN).toBe('global-token');
+    expect(secrets.ANTHROPIC_API_KEY).toBe('global-api-key');
+  });
+
+  it('group .env only overrides keys it defines', () => {
+    mockReadEnvFile.mockReturnValue({
+      GH_TOKEN: 'global-gh',
+      ANTHROPIC_API_KEY: 'global-anthropic',
+      CLAUDE_CODE_OAUTH_TOKEN: 'global-oauth',
+    });
+    mockedFs.readFileSync.mockReturnValue('GH_TOKEN=scoped-gh\n');
+
+    const secrets = readSecrets('feedback');
+
+    expect(secrets.GH_TOKEN).toBe('scoped-gh');
+    expect(secrets.ANTHROPIC_API_KEY).toBe('global-anthropic');
+    expect(secrets.CLAUDE_CODE_OAUTH_TOKEN).toBe('global-oauth');
+  });
+
+  it('ignores unknown keys in group .env', () => {
+    mockReadEnvFile.mockReturnValue({ GH_TOKEN: 'global' });
+    mockedFs.readFileSync.mockReturnValue('GH_TOKEN=scoped\nRANDOM_SECRET=should-not-appear\n');
+
+    const secrets = readSecrets('feedback');
+
+    expect(secrets.GH_TOKEN).toBe('scoped');
+    expect(secrets).not.toHaveProperty('RANDOM_SECRET');
   });
 });

@@ -1,3 +1,12 @@
+export interface Attachment {
+  /** Absolute path on host filesystem */
+  hostPath: string;
+  /** Path inside container (set when preparing for container) */
+  containerPath?: string;
+  contentType: string;
+  filename?: string;
+}
+
 export interface AdditionalMount {
   hostPath: string; // Absolute path on host (supports ~ for home)
   containerPath?: string; // Optional — defaults to basename of hostPath. Mounted at /workspace/extra/{value}
@@ -52,6 +61,7 @@ export interface NewMessage {
   is_from_me?: boolean;
   is_bot_message?: boolean;
   is_reply_to_bot?: boolean;
+  attachments?: Attachment[];
 }
 
 export interface ScheduledTask {
@@ -89,6 +99,8 @@ export interface Channel {
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
+  // Optional: send an image with optional caption.
+  sendImage?(jid: string, imagePath: string, caption?: string): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages
