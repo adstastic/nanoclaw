@@ -4,21 +4,19 @@ Personal Claude assistant. See [README.md](README.md) for philosophy and setup. 
 
 ## Quick Context
 
-Single Node.js process that connects to WhatsApp/Signal/Telegram, routes messages to Claude Agent SDK running in Docker containers. Each group has isolated filesystem and memory. One container per group at a time, managed by `GroupQueue`.
+Single Node.js process that connects to Signal, routes messages to Claude Agent SDK running in Apple Containers. Each group has isolated filesystem and memory. One container per group at a time, managed by `GroupQueue`.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `src/index.ts` | Orchestrator: state, message loop, agent invocation |
-| `src/channels/whatsapp.ts` | WhatsApp connection via Baileys |
 | `src/channels/signal.ts` | Signal via signal-cli-rest-api WebSocket/REST |
-| `src/channels/telegram.ts` | Telegram via grammY |
 | `src/ipc.ts` | IPC watcher: messages, reactions, tasks, group registration |
 | `src/router.ts` | Message formatting (XML) and outbound routing |
 | `src/config.ts` | Trigger pattern, paths, intervals |
-| `src/container-runner.ts` | Spawns Docker containers with mounts |
-| `src/container-runtime.ts` | Docker/container runtime abstraction |
+| `src/container-runner.ts` | Spawns containers with mounts |
+| `src/container-runtime.ts` | Container runtime abstraction (Apple Container) |
 | `src/mount-security.ts` | Validates additional mounts against allowlist |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations (store/messages.db) |
@@ -54,12 +52,7 @@ Single Node.js process that connects to WhatsApp/Signal/Telegram, routes message
 - Idle timeout closes container after inactivity
 - Session ID persisted in DB for conversation continuity across containers
 
-### Channels
-- **WhatsApp**: Baileys library, QR auth, `wa:` JID prefix
-- **Signal**: signal-cli-rest-api sidecar (Docker), WebSocket for receive, REST for send, `sig:` JID prefix
-- **Telegram**: grammY bot library, `tg:` JID prefix
-
-### Signal-Specific Features
+### Signal Channel
 - ⚡ reaction on triggering message when bot starts processing
 - Quote-reply: bot's response quotes the triggering message via `setReplyTarget()`
 - `@mention` and reply-to-bot satisfy trigger (no `@g` prefix needed)
@@ -85,22 +78,16 @@ npm test             # Run vitest
 
 ### Running the Service
 
-Currently run manually (no launchd plist configured yet):
+Managed via LaunchAgent (`~/Library/LaunchAgents/com.nanoclaw.agent.plist`):
 ```bash
-# Start
-npm run build && node dist/index.js >> /tmp/nanoclaw.log 2>&1 &
-
-# Stop
-pkill -f 'node dist/index'
-
-# Restart (kill, rebuild, start)
-pkill -f 'node dist/index'; sleep 2; npm run build && node dist/index.js >> /tmp/nanoclaw.log 2>&1 &
+# Restart (rebuild + restart service)
+npm run build && launchctl kickstart -k gui/$(id -u)/com.nanoclaw.agent
 
 # Check logs
 tail -f /tmp/nanoclaw.log
 
 # Kill stale containers
-docker ps -a --filter "name=nanoclaw" --format "{{.Names}}" | xargs -r docker rm -f
+container ls --format json | jq -r '.[] | select(.name | startswith("nanoclaw")) | .name' | xargs -I{} container stop {}
 ```
 
 ### After Code Changes

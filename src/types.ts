@@ -101,6 +101,10 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: send an image with optional caption.
   sendImage?(jid: string, imagePath: string, caption?: string): Promise<void>;
+  // Optional: react to a message with an emoji.
+  sendReaction?(jid: string, emoji: string, targetTimestamp: number, targetAuthor: string): Promise<void>;
+  // Optional: set a reply target so the next sendMessage quotes this message.
+  setReplyTarget?(jid: string, messageId: string): void;
 }
 
 // Callback type that channels use to deliver inbound messages

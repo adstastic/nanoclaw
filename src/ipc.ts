@@ -12,22 +12,34 @@ import {
 } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import { parseSignalMessageId } from './router.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 /**
  * Map a container-relative path back to its host filesystem location.
+ * Includes path traversal protection — resolved path must stay within the expected base.
  */
 function containerToHostPath(containerPath: string, groupFolder: string): string {
+  let baseDir: string;
+  let relative: string;
+
   if (containerPath.startsWith('/workspace/ipc/')) {
-    return path.join(DATA_DIR, 'ipc', groupFolder, containerPath.slice('/workspace/ipc/'.length));
+    baseDir = path.join(DATA_DIR, 'ipc', groupFolder);
+    relative = containerPath.slice('/workspace/ipc/'.length);
+  } else if (containerPath.startsWith('/workspace/group/')) {
+    baseDir = path.join(GROUPS_DIR, groupFolder);
+    relative = containerPath.slice('/workspace/group/'.length);
+  } else {
+    throw new Error(`Cannot map container path to host: ${containerPath}`);
   }
-  if (containerPath.startsWith('/workspace/group/')) {
-    return path.join(GROUPS_DIR, groupFolder, containerPath.slice('/workspace/group/'.length));
+
+  const resolved = path.resolve(baseDir, relative);
+  if (!resolved.startsWith(baseDir + path.sep) && resolved !== baseDir) {
+    throw new Error(`Path traversal detected: ${containerPath}`);
   }
-  // Additional mounts at /workspace/extra/ — these can't be reverse-mapped without mount config
-  throw new Error(`Cannot map container path to host: ${containerPath}`);
+  return resolved;
 }
 
 export interface IpcDeps {
@@ -84,7 +96,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
         if (fs.existsSync(messagesDir)) {
           const messageFiles = fs
             .readdirSync(messagesDir)
-            .filter((f) => f.endsWith('.json'));
+            .filter((f) => f.endsWith('.json'))
+            .sort();
           for (const file of messageFiles) {
             const filePath = path.join(messagesDir, file);
             try {
@@ -108,17 +121,14 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   );
                 }
               } else if (data.type === 'reaction' && data.chatJid && data.emoji && data.messageId && deps.sendReaction) {
-                // Parse Signal message ID: "{timestamp}-{phoneNumber}"
-                const dashIdx = (data.messageId as string).indexOf('-');
-                if (dashIdx > 0) {
-                  const targetTimestamp = parseInt((data.messageId as string).slice(0, dashIdx), 10);
-                  const targetAuthor = (data.messageId as string).slice(dashIdx + 1);
+                const parsed = parseSignalMessageId(data.messageId as string);
+                if (parsed) {
                   const targetGroup = registeredGroups[data.chatJid];
                   if (
                     isMain ||
                     (targetGroup && targetGroup.folder === sourceGroup)
                   ) {
-                    await deps.sendReaction(data.chatJid, data.emoji as string, targetTimestamp, targetAuthor);
+                    await deps.sendReaction(data.chatJid, data.emoji as string, parsed.timestamp, parsed.author);
                     logger.info(
                       { chatJid: data.chatJid, emoji: data.emoji, sourceGroup },
                       'IPC reaction sent',

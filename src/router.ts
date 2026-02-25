@@ -54,3 +54,15 @@ export function findChannel(
 ): Channel | undefined {
   return channels.find((c) => c.ownsJid(jid));
 }
+
+/**
+ * Parse a Signal-style message ID "{timestamp}-{phoneNumber}".
+ * Returns null if the format doesn't match.
+ */
+export function parseSignalMessageId(id: string): { timestamp: number; author: string } | null {
+  const dashIdx = id.indexOf('-');
+  if (dashIdx <= 0) return null;
+  const timestamp = parseInt(id.slice(0, dashIdx), 10);
+  if (isNaN(timestamp)) return null;
+  return { timestamp, author: id.slice(dashIdx + 1) };
+}

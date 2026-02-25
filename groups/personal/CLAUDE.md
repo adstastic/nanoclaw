@@ -51,16 +51,6 @@ When you learn something important:
 - Split files larger than 500 lines into folders
 - Keep an index in your memory for the files you create
 
-## WhatsApp Formatting (and other messaging apps)
-
-Do NOT use markdown headings (##) in WhatsApp messages. Only use:
-- *Bold* (single asterisks) (NEVER **double asterisks**)
-- _Italic_ (underscores)
-- • Bullets (bullet points)
-- ```Code blocks``` (triple backticks)
-
-Keep messages clean and readable for WhatsApp.
-
 ---
 
 ## Admin Context
@@ -74,7 +64,7 @@ Main has read-only access to the project and read-write access to its group fold
 | Container Path | Host Path | Access |
 |----------------|-----------|--------|
 | `/workspace/project` | Project root | read-only |
-| `/workspace/group` | `groups/main/` | read-write |
+| `/workspace/group` | `groups/personal/` | read-write |
 | `/workspace/extra/obsidian` | `~/personal` | read-write |
 
 ### Obsidian Vault (`/workspace/extra/obsidian`)
@@ -115,9 +105,7 @@ Available groups are provided in `/workspace/ipc/available_groups.json`:
 }
 ```
 
-Groups are ordered by most recent activity. The list is synced from WhatsApp daily.
-
-If a group the user mentions isn't in the list, request a fresh sync:
+Groups are ordered by most recent activity. If a group the user mentions isn't in the list, request a fresh sync:
 
 ```bash
 echo '{"type": "refresh_groups"}' > /workspace/ipc/tasks/refresh_$(date +%s).json

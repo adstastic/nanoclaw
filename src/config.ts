@@ -8,8 +8,6 @@ import { readEnvFile } from './env.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
-  'TELEGRAM_BOT_TOKEN',
-  'TELEGRAM_ONLY',
   'SIGNAL_API_URL',
   'SIGNAL_PHONE_NUMBER',
 ]);
@@ -75,12 +73,6 @@ export function groupTriggerPattern(trigger: string): RegExp {
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
-
-// Telegram configuration
-export const TELEGRAM_BOT_TOKEN =
-  process.env.TELEGRAM_BOT_TOKEN || envConfig.TELEGRAM_BOT_TOKEN || '';
-export const TELEGRAM_ONLY =
-  (process.env.TELEGRAM_ONLY || envConfig.TELEGRAM_ONLY) === 'true';
 
 // Signal configuration
 export const SIGNAL_API_URL =

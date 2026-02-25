@@ -9,13 +9,8 @@ import {
   POLL_INTERVAL,
   SIGNAL_API_URL,
   SIGNAL_PHONE_NUMBER,
-  TELEGRAM_BOT_TOKEN,
-  TELEGRAM_ONLY,
-  TRIGGER_PATTERN,
   groupTriggerPattern,
 } from './config.js';
-import { WhatsAppChannel } from './channels/whatsapp.js';
-import { TelegramChannel } from './channels/telegram.js';
 import { SignalChannel } from './channels/signal.js';
 import {
   ContainerOutput,
@@ -41,7 +36,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import { findChannel, formatMessages, formatOutbound, parseSignalMessageId } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { cleanupOrphans, ensureContainerRuntimeRunning } from './container-runtime.js';
@@ -56,7 +51,6 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-let whatsapp: WhatsAppChannel;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
@@ -167,19 +161,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     'Processing messages',
   );
 
-  // For Signal: react with ⚡ and set reply target for quote-reply
+  // React with ⚡ and set reply target for quote-reply
   const lastMsg = missedMessages[missedMessages.length - 1];
-  if (chatJid.startsWith('sig:') && 'sendReaction' in channel) {
-    const dashIdx = lastMsg.id.indexOf('-');
-    if (dashIdx > 0) {
-      const targetTimestamp = parseInt(lastMsg.id.slice(0, dashIdx), 10);
-      const targetAuthor = lastMsg.id.slice(dashIdx + 1);
-      (channel as any).sendReaction(chatJid, '⚡', targetTimestamp, targetAuthor).catch(() => {});
+  if (channel.sendReaction) {
+    const parsed = parseSignalMessageId(lastMsg.id);
+    if (parsed) {
+      channel.sendReaction(chatJid, '⚡', parsed.timestamp, parsed.author).catch(() => {});
     }
-    // Set reply target so the first response quotes the triggering message
-    if ('setReplyTarget' in channel) {
-      (channel as any).setReplyTarget(chatJid, lastMsg.id);
-    }
+  }
+  if (channel.setReplyTarget) {
+    channel.setReplyTarget(chatJid, lastMsg.id);
   }
 
   // Track idle timer for closing stdin when agent is idle
@@ -231,6 +222,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
     logger.warn({ group: group.name }, 'Agent error, rolled back message cursor for retry');
+    // Notify user so they know something went wrong
+    channel.sendMessage(chatJid, "Sorry, I ran into an error processing your message. I'll retry shortly.").catch(() => {});
     return false;
   }
 
@@ -396,14 +389,12 @@ async function startMessageLoop(): Promise<void> {
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
 
-            // Signal: react ⚡ on piped messages too
+            // React ⚡ on piped messages too
             const pipedLastMsg = messagesToSend[messagesToSend.length - 1];
-            if (chatJid.startsWith('sig:') && 'sendReaction' in channel) {
-              const dashIdx = pipedLastMsg.id.indexOf('-');
-              if (dashIdx > 0) {
-                const ts = parseInt(pipedLastMsg.id.slice(0, dashIdx), 10);
-                const author = pipedLastMsg.id.slice(dashIdx + 1);
-                (channel as any).sendReaction(chatJid, '⚡', ts, author).catch(() => {});
+            if (channel.sendReaction) {
+              const parsed = parseSignalMessageId(pipedLastMsg.id);
+              if (parsed) {
+                channel.sendReaction(chatJid, '⚡', parsed.timestamp, parsed.author).catch(() => {});
               }
             }
 
@@ -467,18 +458,6 @@ async function main(): Promise<void> {
   };
 
   // Create and connect channels
-  if (!TELEGRAM_ONLY) {
-    whatsapp = new WhatsAppChannel(channelOpts);
-    channels.push(whatsapp);
-    await whatsapp.connect();
-  }
-
-  if (TELEGRAM_BOT_TOKEN) {
-    const telegram = new TelegramChannel(TELEGRAM_BOT_TOKEN, channelOpts);
-    channels.push(telegram);
-    await telegram.connect();
-  }
-
   if (SIGNAL_PHONE_NUMBER) {
     const signal = new SignalChannel(SIGNAL_API_URL, SIGNAL_PHONE_NUMBER, channelOpts);
     channels.push(signal);
@@ -507,8 +486,8 @@ async function main(): Promise<void> {
     sendReaction: (jid, emoji, targetTimestamp, targetAuthor) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      if ('sendReaction' in channel && typeof (channel as any).sendReaction === 'function') {
-        return (channel as any).sendReaction(jid, emoji, targetTimestamp, targetAuthor);
+      if (channel.sendReaction) {
+        return channel.sendReaction(jid, emoji, targetTimestamp, targetAuthor);
       }
       return Promise.resolve(); // Channel doesn't support reactions
     },
@@ -520,7 +499,7 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
+    syncGroupMetadata: () => Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
   });
