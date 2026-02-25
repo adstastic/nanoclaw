@@ -199,8 +199,10 @@ function createPreCompactHook(assistantName?: string): HookCallback {
 
 // Secrets to strip from Bash tool subprocess environments.
 // These are needed by claude-code for API auth but should never
-// be visible to commands Kit runs.
-const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'GH_TOKEN'];
+// be visible to commands the agent runs.
+// Note: GH_TOKEN is intentionally omitted — it's a BASH_SAFE_SECRET
+// explicitly exposed so the agent can use gh CLI.
+const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
 
 function createSanitizeBashHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
