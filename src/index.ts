@@ -293,6 +293,7 @@ async function runAgent(
         chatJid,
         isMain,
         attachments: attachments?.length ? attachments : undefined,
+        assistantName: ASSISTANT_NAME,
       },
       (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
