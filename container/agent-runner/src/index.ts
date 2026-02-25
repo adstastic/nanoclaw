@@ -24,7 +24,11 @@ type ImageContentBlock = {
   type: 'image';
   source: { type: 'base64'; media_type: string; data: string };
 };
-type ContentBlock = TextContentBlock | ImageContentBlock;
+type DocumentContentBlock = {
+  type: 'document';
+  source: { type: 'base64'; media_type: string; data: string };
+};
+type ContentBlock = TextContentBlock | ImageContentBlock | DocumentContentBlock;
 
 interface ContainerInput {
   prompt: string;
@@ -303,7 +307,11 @@ function shouldClose(): boolean {
 }
 
 /**
- * Build content block array with text and images for Claude's vision API.
+ * Build content block array for Claude's API.
+ * - image/* → image block (vision)
+ * - application/pdf → document block (native PDF reading)
+ * - text/* → text block (UTF-8 content inlined)
+ * - else → text note with container path for Bash/Read tool use
  */
 function buildContentBlocks(
   text: string,
@@ -311,12 +319,31 @@ function buildContentBlocks(
 ): ContentBlock[] {
   const blocks: ContentBlock[] = [{ type: 'text', text }];
   for (const att of attachments) {
+    const ct = att.contentType;
     try {
-      const data = fs.readFileSync(att.containerPath, 'base64');
-      blocks.push({
-        type: 'image',
-        source: { type: 'base64', media_type: att.contentType, data },
-      });
+      if (ct.startsWith('image/')) {
+        const data = fs.readFileSync(att.containerPath, 'base64');
+        blocks.push({
+          type: 'image',
+          source: { type: 'base64', media_type: ct, data },
+        });
+      } else if (ct === 'application/pdf') {
+        const data = fs.readFileSync(att.containerPath, 'base64');
+        blocks.push({
+          type: 'document',
+          source: { type: 'base64', media_type: 'application/pdf', data },
+        });
+      } else if (ct.startsWith('text/')) {
+        const fileText = fs.readFileSync(att.containerPath, 'utf-8');
+        const header = `[File: ${path.basename(att.containerPath)}]\n`;
+        blocks.push({ type: 'text', text: header + fileText });
+      } else {
+        // Binary file — agent uses Bash/Read tools to process it
+        blocks.push({
+          type: 'text',
+          text: `[Attached file: ${att.containerPath} (${ct}) — use Bash or Read tools to process]`,
+        });
+      }
     } catch (err) {
       log(`Failed to read attachment ${att.containerPath}: ${err instanceof Error ? err.message : String(err)}`);
     }
