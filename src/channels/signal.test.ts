@@ -951,6 +951,12 @@ describe('SignalChannel', () => {
       );
       await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
 
+      // File written to correct index-based path (not att.filename)
+      expect(vi.mocked(fs.writeFileSync)).toHaveBeenCalledWith(
+        expect.stringContaining('0.bin'),
+        expect.any(Buffer),
+      );
+
       expect(opts.onMessage).toHaveBeenCalledWith(
         'sig:+15559990000',
         expect.objectContaining({
