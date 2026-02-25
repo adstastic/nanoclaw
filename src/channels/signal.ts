@@ -269,7 +269,7 @@ export class SignalChannel implements Channel {
     // Build content from text + attachments
     let content = messageText;
     const rawAttachments: any[] = dataMessage.attachments || [];
-    const imageAttachments: Attachment[] = [];
+    const downloadedAttachments: Attachment[] = [];
 
     for (let i = 0; i < rawAttachments.length; i++) {
       const att = rawAttachments[i];
@@ -298,10 +298,23 @@ export class SignalChannel implements Channel {
 
         const ok = await this.downloadAttachment(att.id, filePath);
         if (ok) {
-          imageAttachments.push({ hostPath: filePath, contentType: ct, filename });
+          downloadedAttachments.push({ hostPath: filePath, contentType: ct, filename });
         }
         content = content ? `${content} [Image: ${filename}]` : `[Image: ${filename}]`;
+      } else if (att.id) {
+        // Non-image, non-text attachment — download and surface path to agent
+        const ext = extFromContentType(ct);
+        const displayName = att.filename || `attachment-${i}.${ext}`;
+        const attachDir = path.join(STORE_DIR, 'attachments', msgId);
+        const filePath = path.join(attachDir, `${i}.${ext}`);
+
+        const ok = await this.downloadAttachment(att.id, filePath);
+        if (ok) {
+          downloadedAttachments.push({ hostPath: filePath, contentType: ct, filename: displayName });
+        }
+        content = content ? `${content} [File: ${displayName}]` : `[File: ${displayName}]`;
       } else {
+        // No id — can't download, show a type-appropriate placeholder
         const type = ct.split('/')[0];
         let placeholder: string;
         switch (type) {
@@ -362,7 +375,7 @@ export class SignalChannel implements Channel {
       timestamp,
       is_from_me: false,
       is_reply_to_bot: isReplyToBot,
-      attachments: imageAttachments.length > 0 ? imageAttachments : undefined,
+      attachments: downloadedAttachments.length > 0 ? downloadedAttachments : undefined,
     });
 
     logger.info(

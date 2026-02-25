@@ -17,6 +17,22 @@ vi.mock('../logger.js', () => ({
   },
 }));
 
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      mkdirSync: vi.fn(),
+      writeFileSync: vi.fn(),
+      readFileSync: actual.readFileSync,
+    },
+    mkdirSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    readFileSync: actual.readFileSync,
+  };
+});
+
 // --- WebSocket mock ---
 
 type WSHandler = (event: any) => void;
@@ -88,6 +104,7 @@ afterEach(() => {
   (globalThis as any).fetch = originalFetch;
 });
 
+import fs from 'fs';
 import { SignalChannel, SignalChannelOpts } from './signal.js';
 
 // --- Test helpers ---
@@ -855,6 +872,140 @@ describe('SignalChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'sig:+15559990000',
         expect.objectContaining({ content: 'See attached [Attachment]' }),
+      );
+    });
+  });
+
+  // --- Non-image attachment download ---
+
+  describe('non-image attachment download', () => {
+    beforeEach(() => {
+      vi.mocked(fs.mkdirSync).mockClear();
+      vi.mocked(fs.writeFileSync).mockClear();
+    });
+
+    it('downloads a PDF attachment and includes it in message attachments', async () => {
+      const pdfBytes = Buffer.from('%PDF-1.4 fake content');
+
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      // Set up attachment fetch mock AFTER connectChannel (which consumed the /v1/about mock)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        arrayBuffer: async () => pdfBytes.buffer,
+      });
+
+      const ts = 1704067200000;
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          timestamp: ts,
+          message: 'Check this out',
+          attachments: [{ contentType: 'application/pdf', id: 'pdf-123', filename: 'report.pdf' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      // Fetch called for the attachment
+      expect(mockFetch).toHaveBeenCalledWith('http://localhost:8080/v1/attachments/pdf-123');
+
+      // File written to correct path (index-based, not att.filename)
+      const msgId = `${ts}-+15559990000`;
+      expect(vi.mocked(fs.writeFileSync)).toHaveBeenCalledWith(
+        expect.stringContaining(`attachments/${msgId}/0.pdf`),
+        expect.any(Buffer),
+      );
+
+      // onMessage called with attachment metadata and display hint in content
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: expect.stringContaining('[File: report.pdf]'),
+          attachments: expect.arrayContaining([
+            expect.objectContaining({ contentType: 'application/pdf' }),
+          ]),
+        }),
+      );
+    });
+
+    it('downloads an unknown-type attachment and includes path hint in content', async () => {
+      const zipBytes = Buffer.from('PK fake zip');
+
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        arrayBuffer: async () => zipBytes.buffer,
+      });
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: '',
+          attachments: [{ contentType: 'application/zip', id: 'zip-456', filename: 'archive.zip' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: expect.stringContaining('[File: archive.zip]'),
+          attachments: expect.arrayContaining([
+            expect.objectContaining({ contentType: 'application/zip' }),
+          ]),
+        }),
+      );
+    });
+
+    it('shows [Attachment] placeholder when no id (no download)', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: 'Hi',
+          attachments: [{ contentType: 'application/pdf' }], // no id
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({ content: 'Hi [Attachment]' }),
+      );
+      expect(vi.mocked(fs.writeFileSync)).not.toHaveBeenCalled();
+    });
+
+    it('gracefully delivers message when attachment download fails', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      mockFetch.mockRejectedValueOnce(new Error('Network error'));
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: 'See attached',
+          attachments: [{ contentType: 'application/pdf', id: 'fail-pdf' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      // Message still delivered, no attachment in the array
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: expect.stringContaining('See attached'),
+          attachments: undefined,
+        }),
       );
     });
   });
