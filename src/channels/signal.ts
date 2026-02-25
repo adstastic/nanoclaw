@@ -19,6 +19,10 @@ function extFromContentType(ct: string): string {
   const map: Record<string, string> = {
     'image/jpeg': 'jpg', 'image/png': 'png',
     'image/gif': 'gif', 'image/webp': 'webp',
+    'application/pdf': 'pdf',
+    'text/plain': 'txt',
+    'text/csv': 'csv',
+    'text/markdown': 'md',
   };
   return map[ct] || 'bin';
 }

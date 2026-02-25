@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
   TRIGGER_PATTERN: /^@Andy\b/i,
+  STORE_DIR: '/tmp/test-store',
 }));
 
 vi.mock('../logger.js', () => ({
@@ -835,6 +836,26 @@ describe('SignalChannel', () => {
 
       expect(opts.onMessage).not.toHaveBeenCalled();
       expect(opts.onChatMetadata).not.toHaveBeenCalled();
+    });
+
+    it('shows [Attachment] placeholder for pdf without id (no download attempted)', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: 'See attached',
+          attachments: [{ contentType: 'application/pdf' }], // no id
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({ content: 'See attached [Attachment]' }),
+      );
     });
   });
 
