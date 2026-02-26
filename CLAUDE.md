@@ -18,6 +18,7 @@ Single Node.js process that connects to Signal, routes messages to Claude Agent 
 | `src/container-runner.ts` | Spawns containers with mounts |
 | `src/container-runtime.ts` | Container runtime abstraction (Apple Container) |
 | `src/mount-security.ts` | Validates additional mounts against allowlist |
+| `src/api.ts` | HTTP API for programmatic access (wearable, scripts) |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations (store/messages.db) |
 | `groups/{name}/CLAUDE.md` | Per-group agent instructions (versioned in git) |
@@ -87,14 +88,15 @@ npm run build && launchctl kickstart -k gui/$(id -u)/com.nanoclaw.agent
 tail -f /tmp/nanoclaw.log
 
 # Kill stale containers
-container ls --format json | jq -r '.[] | select(.name | startswith("nanoclaw")) | .name' | xargs -I{} container stop {}
+container ls | grep nanoclaw | awk '{print $1}' | xargs -I{} container stop {}
 ```
 
 ### After Code Changes
 1. `npm run build` — compile TypeScript
-2. Kill running process and restart
-3. If container-side code changed (agent-runner, MCP server): `./container/build.sh`
-4. If agent can't find new tools: clear session in DB (`DELETE FROM sessions WHERE group_folder = '...'`)
+2. Kill stale containers: `container ls | grep nanoclaw | awk '{print $1}' | xargs -I{} container stop {}`
+3. Restart service: `launchctl kickstart -k gui/$(id -u)/com.nanoclaw.agent`
+4. If container-side code changed (agent-runner, MCP server): `./container/build.sh`
+5. If agent can't find new tools: clear session in DB (`DELETE FROM sessions WHERE group_folder = '...'`)
 
 ### Database
 - Path: `store/messages.db` (SQLite)
