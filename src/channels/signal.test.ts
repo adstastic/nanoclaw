@@ -1116,7 +1116,7 @@ describe('SignalChannel', () => {
 
       await expect(
         channel.sendMessage('sig:+15559990000', 'Will fail'),
-      ).resolves.toBeUndefined();
+      ).rejects.toThrow('Network error');
     });
   });
 

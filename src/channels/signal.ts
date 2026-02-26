@@ -500,13 +500,14 @@ export class SignalChannel implements Channel {
         });
         if (!res.ok) {
           const detail = await res.text().catch(() => '');
-          logger.error({ jid, status: res.status, detail }, 'Signal send failed');
+          throw new Error(`Signal send failed: HTTP ${res.status} — ${detail}`);
         }
       }
 
       logger.info({ jid, length: text.length }, 'Signal message sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Signal message');
+      throw err;
     }
   }
 
