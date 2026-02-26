@@ -183,7 +183,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -207,7 +206,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }, attachments);
 
-  await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -396,8 +394,6 @@ async function startMessageLoop(): Promise<void> {
               }
             }
 
-            // Show typing indicator while the container processes the piped message
-            channel.setTyping?.(chatJid, true);
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
