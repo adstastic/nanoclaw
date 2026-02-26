@@ -264,6 +264,32 @@ describe('getNewMessages', () => {
     expect(messages).toHaveLength(0);
     expect(newTimestamp).toBe('');
   });
+
+  it('round-trips attachments through getNewMessages', () => {
+    storeMessage({
+      id: 'att-1',
+      chat_jid: 'group1@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'User',
+      content: 'here is a file [Image: photo.jpg]',
+      timestamp: '2024-01-01T00:00:10.000Z',
+      is_from_me: false,
+      attachments: [
+        { hostPath: '/store/attachments/att-1/0.jpg', contentType: 'image/jpeg', filename: 'photo.jpg' },
+      ],
+    });
+
+    const { messages } = getNewMessages(
+      ['group1@g.us'],
+      '2024-01-01T00:00:05.000Z',
+      'Andy',
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0].id).toBe('att-1');
+    expect(messages[0].attachments).toEqual([
+      { hostPath: '/store/attachments/att-1/0.jpg', contentType: 'image/jpeg', filename: 'photo.jpg' },
+    ]);
+  });
 });
 
 // --- storeChatMetadata ---
