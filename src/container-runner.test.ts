@@ -91,7 +91,7 @@ vi.mock('child_process', async () => {
 
 import fs from 'fs';
 import { runContainerAgent, readSecrets, prepareAttachmentsForContainer, ContainerOutput } from './container-runner.js';
-import type { RegisteredGroup } from './types.js';
+import type { RegisteredGroup, NewMessage } from './types.js';
 
 const mockedFs = vi.mocked(fs);
 
@@ -288,42 +288,65 @@ describe('readSecrets per-group overrides', () => {
 describe('prepareAttachmentsForContainer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedFs.mkdirSync.mockReturnValue(undefined as any);
+    mockedFs.copyFileSync.mockReturnValue(undefined);
   });
 
-  it('maps pdf extension to application/pdf content type', () => {
-    mockedFs.existsSync.mockReturnValue(true);
-    mockedFs.readdirSync.mockReturnValue(['0.pdf'] as any);
+  it('copies attachment to IPC dir and returns container path with original content type', () => {
+    const messages: NewMessage[] = [{
+      id: 'msg-001',
+      chat_jid: 'sig:+1234',
+      sender: '+1234',
+      sender_name: 'Alice',
+      content: 'here [Image: photo.jpg]',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: false,
+      attachments: [{ hostPath: '/store/attachments/msg-001/0.jpg', contentType: 'image/jpeg', filename: 'photo.jpg' }],
+    }];
 
-    const result = prepareAttachmentsForContainer(['msg-001'], 'main');
+    const result = prepareAttachmentsForContainer(messages, 'main');
 
-    expect(result).toEqual([
-      {
-        containerPath: '/workspace/ipc/attachments/msg-001/0.pdf',
-        contentType: 'application/pdf',
-      },
-    ]);
+    expect(result).toEqual([{
+      containerPath: '/workspace/ipc/attachments/msg-001/photo.jpg',
+      contentType: 'image/jpeg',
+    }]);
+    expect(mockedFs.copyFileSync).toHaveBeenCalledWith(
+      '/store/attachments/msg-001/0.jpg',
+      expect.stringContaining('msg-001/photo.jpg'),
+    );
   });
 
-  it('maps txt extension to text/plain content type', () => {
-    mockedFs.existsSync.mockReturnValue(true);
-    mockedFs.readdirSync.mockReturnValue(['0.txt'] as any);
+  it('uses hostPath basename as filename when filename not set', () => {
+    const messages: NewMessage[] = [{
+      id: 'msg-002',
+      chat_jid: 'sig:+1234',
+      sender: '+1234',
+      sender_name: 'Alice',
+      content: 'doc',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: false,
+      attachments: [{ hostPath: '/store/attachments/msg-002/0.pdf', contentType: 'application/pdf' }],
+    }];
 
-    const result = prepareAttachmentsForContainer(['msg-002'], 'main');
+    const result = prepareAttachmentsForContainer(messages, 'main');
 
-    expect(result).toEqual([
-      {
-        containerPath: '/workspace/ipc/attachments/msg-002/0.txt',
-        contentType: 'text/plain',
-      },
-    ]);
+    expect(result[0].containerPath).toBe('/workspace/ipc/attachments/msg-002/0.pdf');
+    expect(result[0].contentType).toBe('application/pdf');
   });
 
-  it('falls back to application/octet-stream for unknown extensions', () => {
-    mockedFs.existsSync.mockReturnValue(true);
-    mockedFs.readdirSync.mockReturnValue(['0.bin'] as any);
+  it('skips messages with no attachments', () => {
+    const messages: NewMessage[] = [{
+      id: 'msg-003',
+      chat_jid: 'sig:+1234',
+      sender: '+1234',
+      sender_name: 'Alice',
+      content: 'just text',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: false,
+    }];
 
-    const result = prepareAttachmentsForContainer(['msg-003'], 'main');
-
-    expect(result[0].contentType).toBe('application/octet-stream');
+    const result = prepareAttachmentsForContainer(messages, 'main');
+    expect(result).toEqual([]);
+    expect(mockedFs.copyFileSync).not.toHaveBeenCalled();
   });
 });

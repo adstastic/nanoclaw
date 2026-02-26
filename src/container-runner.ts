@@ -21,7 +21,7 @@ import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { CONTAINER_RUNTIME_BIN, readonlyMountArgs, stopContainerArgs } from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
-import { RegisteredGroup } from './types.js';
+import { NewMessage, RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -626,48 +626,34 @@ export async function runContainerAgent(
   });
 }
 
-const CONTENT_TYPE_FROM_EXT: Record<string, string> = {
-  jpg: 'image/jpeg', jpeg: 'image/jpeg',
-  png: 'image/png', gif: 'image/gif', webp: 'image/webp',
-  pdf: 'application/pdf',
-  txt: 'text/plain',
-  csv: 'text/csv',
-  md: 'text/markdown',
-};
-
 /**
- * Scan store/attachments/ for files matching the given message IDs,
- * copy them into the group's IPC attachments directory (mounted in container),
- * and return metadata for the container input.
+ * Copy attachments from host storage into the group's IPC attachments directory
+ * (which is bind-mounted at /workspace/ipc in the container) and return
+ * container-relative path + content type metadata for the container input.
+ *
+ * Uses attachment metadata already stored on the NewMessage (hostPath, contentType,
+ * filename) — no disk scanning or extension-based content-type re-derivation.
  */
 export function prepareAttachmentsForContainer(
-  messageIds: string[],
+  messages: NewMessage[],
   groupFolder: string,
 ): { containerPath: string; contentType: string }[] {
-  const attachmentsDir = path.join(STORE_DIR, 'attachments');
   const groupIpcDir = resolveGroupIpcPath(groupFolder);
   const ipcAttachmentsDir = path.join(groupIpcDir, 'attachments');
   const result: { containerPath: string; contentType: string }[] = [];
 
-  for (const msgId of messageIds) {
-    const msgDir = path.join(attachmentsDir, msgId);
-    if (!fs.existsSync(msgDir)) continue;
+  for (const msg of messages) {
+    if (!msg.attachments?.length) continue;
 
-    let files: string[];
-    try { files = fs.readdirSync(msgDir); } catch { continue; }
-
-    for (const file of files) {
-      if (file.startsWith('.')) continue;
-      const srcPath = path.join(msgDir, file);
-      const destDir = path.join(ipcAttachmentsDir, msgId);
+    for (const att of msg.attachments) {
+      const filename = att.filename || path.basename(att.hostPath);
+      const destDir = path.join(ipcAttachmentsDir, msg.id);
       fs.mkdirSync(destDir, { recursive: true });
-      fs.copyFileSync(srcPath, path.join(destDir, file));
+      fs.copyFileSync(att.hostPath, path.join(destDir, filename));
 
-      const ext = path.extname(file).slice(1).toLowerCase();
-      const contentType = CONTENT_TYPE_FROM_EXT[ext] || 'application/octet-stream';
       result.push({
-        containerPath: `/workspace/ipc/attachments/${msgId}/${file}`,
-        contentType,
+        containerPath: `/workspace/ipc/attachments/${msg.id}/${filename}`,
+        contentType: att.contentType,
       });
     }
   }

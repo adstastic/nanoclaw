@@ -146,8 +146,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const prompt = formatMessages(missedMessages);
 
   // Prepare image attachments for container (copies files to IPC dir)
-  const messageIds = missedMessages.map(m => m.id);
-  const attachments = prepareAttachmentsForContainer(messageIds, group.folder);
+  const attachments = prepareAttachmentsForContainer(missedMessages, group.folder);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -377,8 +376,7 @@ async function startMessageLoop(): Promise<void> {
           const formatted = formatMessages(messagesToSend);
 
           // Prepare attachments for piped messages
-          const pipeMessageIds = messagesToSend.map(m => m.id);
-          const pipeAttachments = prepareAttachmentsForContainer(pipeMessageIds, group.folder);
+          const pipeAttachments = prepareAttachmentsForContainer(messagesToSend, group.folder);
 
           if (queue.sendMessage(chatJid, formatted, pipeAttachments.length > 0 ? pipeAttachments : undefined)) {
             logger.debug(
