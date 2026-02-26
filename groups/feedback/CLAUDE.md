@@ -19,7 +19,7 @@ When invoked by the scheduler, follow these steps exactly:
    gh issue list --repo familiar-ai/feedback --state all --json number,title,body,author,createdAt,labels,state --limit 50
    ```
 
-3. Filter to issues with `number > last_issue_number`. If none, output nothing (empty response).
+3. Filter to issues with `number > last_issue_number`. If none, output nothing and stop — your entire response must be empty. Do not send a message, do not write "no new issues", do not summarize what you did.
 
 4. Triage the new issues. For each one, determine:
    - Category: bug, feature request, UX issue, hardware, positive feedback, or noise
@@ -85,8 +85,3 @@ When asked for a "sitrep", "situation report", "what's our feedback looking like
 - Cross-reference issues by app-id or device-id to see one user's full feedback history
 - Answer any other questions about the feedback data
 
-## Style
-
-- Plain text only. No markdown (Signal doesn't render it).
-- Be concise. Every word should earn its place.
-- Don't pad with filler ("Sure!", "Here's what I found:").
