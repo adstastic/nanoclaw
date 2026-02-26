@@ -108,5 +108,5 @@ The container buildkit caches the build context aggressively. `--no-cache` alone
 
 ## Known Issues
 
-- **send_reaction MCP tool not discoverable**: The `send_reaction` tool exists in the container's MCP server but the agent can't see it. Needs investigation — may be SDK tool discovery issue or allowedTools wildcard problem.
+- **send_reaction requires explicit CLAUDE.md mention**: `send_reaction` works, but the agent only discovers it when it is explicitly mentioned in the group's CLAUDE.md. Add a note about the tool in the relevant group's CLAUDE.md to enable it.
 - **Duplicate processes**: If multiple NanoClaw processes run simultaneously, Signal WebSocket messages get split between them (only one consumer gets each message). Always ensure single instance.

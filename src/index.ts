@@ -222,7 +222,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     saveState();
     logger.warn({ group: group.name }, 'Agent error, rolled back message cursor for retry');
     // Notify user so they know something went wrong
-    channel.sendMessage(chatJid, "Sorry, I ran into an error processing your message. I'll retry shortly.").catch(() => {});
+    channel.sendMessage(chatJid, "[System] Error processing your message. Will retry.").catch(() => {});
     return false;
   }
 
@@ -430,7 +430,48 @@ function recoverPendingMessages(): void {
 }
 
 
+const PID_FILE = '/tmp/nanoclaw.pid';
+
+function writePidFile(): void {
+  fs.writeFileSync(PID_FILE, String(process.pid));
+}
+
+function removePidFile(): void {
+  try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
+}
+
+function checkPidFile(): void {
+  let existingPid: number | null = null;
+  try {
+    const content = fs.readFileSync(PID_FILE, 'utf-8').trim();
+    existingPid = parseInt(content, 10);
+  } catch {
+    // No PID file — first run
+    return;
+  }
+
+  if (!existingPid || isNaN(existingPid)) return;
+
+  try {
+    process.kill(existingPid, 0);
+    // If we get here, the process is still running
+    logger.error(
+      { pid: existingPid },
+      `Another NanoClaw process is already running (PID ${existingPid}). Exiting.`,
+    );
+    process.exit(1);
+  } catch {
+    // Process not running — stale PID file, safe to proceed
+    logger.warn({ pid: existingPid }, 'Stale PID file found, proceeding');
+  }
+}
+
 async function main(): Promise<void> {
+  checkPidFile();
+  writePidFile();
+  // Clean up PID file on any exit, including uncaught exceptions
+  process.on('exit', removePidFile);
+
   await ensureContainerRuntimeRunning();
   cleanupOrphans();
   initDatabase();
@@ -440,6 +481,7 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    removePidFile();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);

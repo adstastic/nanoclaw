@@ -199,10 +199,9 @@ function createPreCompactHook(assistantName?: string): HookCallback {
 }
 
 // Secrets to strip from Bash tool subprocess environments.
-// These are needed by claude-code for API auth but should never
-// be visible to commands the agent runs.
-// Note: GH_TOKEN is intentionally omitted — it's a BASH_SAFE_SECRET
-// explicitly exposed so the agent can use gh CLI.
+// Prevents leakage of sensitive credentials to arbitrary commands the agent runs.
+// GH_TOKEN is intentionally omitted — it's a BASH_SAFE_SECRET explicitly
+// exposed so the agent can use gh CLI for legitimate tool use.
 const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
 
 function createSanitizeBashHook(): HookCallback {
@@ -589,8 +588,9 @@ async function main(): Promise<void> {
     sdkEnv[key] = value;
   }
 
-  // Expose read-only tool tokens to process.env so Bash subprocesses (gh, etc.) can use them.
-  // Only non-sensitive tool tokens go here — never API keys or OAuth tokens.
+  // Expose scoped tool tokens to process.env so Bash subprocesses (gh, etc.) can use them.
+  // These are scoped tool tokens (not Claude auth credentials) — safe to expose to Bash subprocesses.
+  // Never put API keys or OAuth tokens here.
   const BASH_SAFE_SECRETS = ['GH_TOKEN'];
   for (const key of BASH_SAFE_SECRETS) {
     if (containerInput.secrets?.[key]) {
