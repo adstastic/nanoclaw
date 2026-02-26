@@ -551,6 +551,20 @@ export class SignalChannel implements Channel {
     }
   }
 
+  async setTyping(jid: string, isTyping: boolean): Promise<void> {
+    try {
+      const stripped = jid.replace(/^sig:/, '');
+      const method = isTyping ? 'PUT' : 'DELETE';
+      await fetch(`${this.apiUrl}/v1/typing-indicator/${this.phoneNumber}`, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipient: stripped }),
+      });
+    } catch (err) {
+      logger.debug({ jid, err }, 'Failed to send typing indicator');
+    }
+  }
+
   isConnected(): boolean {
     return this.connected;
   }
