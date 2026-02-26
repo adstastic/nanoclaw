@@ -163,6 +163,16 @@ describe('stripInternalTags', () => {
   it('returns empty string when text is only internal tags', () => {
     expect(stripInternalTags('<internal>only this</internal>')).toBe('');
   });
+
+  it('strips unclosed internal tag to end of string', () => {
+    expect(stripInternalTags('<internal>no closing tag here')).toBe('');
+  });
+
+  it('strips closed blocks then unclosed trailing block', () => {
+    expect(
+      stripInternalTags('<internal>closed</internal>visible<internal>unclosed'),
+    ).toBe('visible');
+  });
 });
 
 describe('formatOutbound', () => {
