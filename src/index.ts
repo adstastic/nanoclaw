@@ -3,19 +3,22 @@ import path from 'path';
 
 import {
   ASSISTANT_NAME,
+  DATA_DIR,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
-  TRIGGER_PATTERN,
+  SIGNAL_API_URL,
+  SIGNAL_PHONE_NUMBER,
+  groupTriggerPattern,
 } from './config.js';
-import { WhatsAppChannel } from './channels/whatsapp.js';
+import { SignalChannel } from './channels/signal.js';
 import {
   ContainerOutput,
+  prepareAttachmentsForContainer,
   runContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
-import { cleanupOrphans, ensureContainerRuntimeRunning } from './container-runtime.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
@@ -32,11 +35,11 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import { findChannel, formatMessages, formatOutbound, parseSignalMessageId } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { cleanupOrphans, ensureContainerRuntimeRunning } from './container-runtime.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -48,7 +51,6 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-let whatsapp: WhatsAppChannel;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
@@ -78,21 +80,11 @@ function saveState(): void {
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
-  let groupDir: string;
-  try {
-    groupDir = resolveGroupFolderPath(group.folder);
-  } catch (err) {
-    logger.warn(
-      { jid, folder: group.folder, err },
-      'Rejecting group registration with invalid folder',
-    );
-    return;
-  }
-
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
 
   // Create group folder
+  const groupDir = path.join(DATA_DIR, '..', 'groups', group.folder);
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
 
   logger.info(
@@ -133,10 +125,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (!group) return true;
 
   const channel = findChannel(channels, chatJid);
-  if (!channel) {
-    console.log(`Warning: no channel owns JID ${chatJid}, skipping messages`);
-    return true;
-  }
+  if (!channel) return true;
 
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
@@ -147,13 +136,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
+    const pattern = groupTriggerPattern(group.trigger);
     const hasTrigger = missedMessages.some((m) =>
-      TRIGGER_PATTERN.test(m.content.trim()),
+      pattern.test(m.content.trim()) || m.is_reply_to_bot,
     );
     if (!hasTrigger) return true;
   }
 
   const prompt = formatMessages(missedMessages);
+
+  // Prepare image attachments for container (copies files to IPC dir)
+  const attachments = prepareAttachmentsForContainer(missedMessages, group.folder);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -167,6 +160,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     'Processing messages',
   );
 
+  // React with ⚡ and set reply target for quote-reply
+  const lastMsg = missedMessages[missedMessages.length - 1];
+  if (channel.sendReaction) {
+    const parsed = parseSignalMessageId(lastMsg.id);
+    if (parsed) {
+      channel.sendReaction(chatJid, '⚡', parsed.timestamp, parsed.author).catch(() => {});
+    }
+  }
+  if (channel.setReplyTarget) {
+    channel.setReplyTarget(chatJid, lastMsg.id);
+  }
+
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -178,7 +183,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -197,16 +201,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       resetIdleTimer();
     }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
-
     if (result.status === 'error') {
       hadError = true;
     }
-  });
+  }, attachments);
 
-  await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -220,6 +219,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
     logger.warn({ group: group.name }, 'Agent error, rolled back message cursor for retry');
+    // Notify user so they know something went wrong
+    channel.sendMessage(chatJid, "[System] Error processing your message. Will retry.").catch(() => {});
     return false;
   }
 
@@ -231,6 +232,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  attachments?: { containerPath: string; contentType: string }[],
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
@@ -280,6 +282,7 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
+        attachments: attachments?.length ? attachments : undefined,
         assistantName: ASSISTANT_NAME,
       },
       (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -343,10 +346,7 @@ async function startMessageLoop(): Promise<void> {
           if (!group) continue;
 
           const channel = findChannel(channels, chatJid);
-          if (!channel) {
-            console.log(`Warning: no channel owns JID ${chatJid}, skipping messages`);
-            continue;
-          }
+          if (!channel) continue;
 
           const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
@@ -355,8 +355,9 @@ async function startMessageLoop(): Promise<void> {
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
+            const pattern = groupTriggerPattern(group.trigger);
             const hasTrigger = groupMessages.some((m) =>
-              TRIGGER_PATTERN.test(m.content.trim()),
+              pattern.test(m.content.trim()) || m.is_reply_to_bot,
             );
             if (!hasTrigger) continue;
           }
@@ -372,7 +373,10 @@ async function startMessageLoop(): Promise<void> {
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend);
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          // Prepare attachments for piped messages
+          const pipeAttachments = prepareAttachmentsForContainer(messagesToSend, group.folder);
+
+          if (queue.sendMessage(chatJid, formatted, pipeAttachments.length > 0 ? pipeAttachments : undefined)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
@@ -380,10 +384,16 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
-            // Show typing indicator while the container processes the piped message
-            channel.setTyping?.(chatJid, true)?.catch((err) =>
-              logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-            );
+
+            // React ⚡ on piped messages too
+            const pipedLastMsg = messagesToSend[messagesToSend.length - 1];
+            if (channel.sendReaction) {
+              const parsed = parseSignalMessageId(pipedLastMsg.id);
+              if (parsed) {
+                channel.sendReaction(chatJid, '⚡', parsed.timestamp, parsed.author).catch(() => {});
+              }
+            }
+
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
@@ -415,13 +425,51 @@ function recoverPendingMessages(): void {
   }
 }
 
-function ensureContainerSystemRunning(): void {
-  ensureContainerRuntimeRunning();
-  cleanupOrphans();
+
+const PID_FILE = '/tmp/nanoclaw.pid';
+
+function writePidFile(): void {
+  fs.writeFileSync(PID_FILE, String(process.pid));
+}
+
+function removePidFile(): void {
+  try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
+}
+
+function checkPidFile(): void {
+  let existingPid: number | null = null;
+  try {
+    const content = fs.readFileSync(PID_FILE, 'utf-8').trim();
+    existingPid = parseInt(content, 10);
+  } catch {
+    // No PID file — first run
+    return;
+  }
+
+  if (!existingPid || isNaN(existingPid)) return;
+
+  try {
+    process.kill(existingPid, 0);
+    // If we get here, the process is still running
+    logger.error(
+      { pid: existingPid },
+      `Another NanoClaw process is already running (PID ${existingPid}). Exiting.`,
+    );
+    process.exit(1);
+  } catch {
+    // Process not running — stale PID file, safe to proceed
+    logger.warn({ pid: existingPid }, 'Stale PID file found, proceeding');
+  }
 }
 
 async function main(): Promise<void> {
-  ensureContainerSystemRunning();
+  checkPidFile();
+  writePidFile();
+  // Clean up PID file on any exit, including uncaught exceptions
+  process.on('exit', removePidFile);
+
+  await ensureContainerRuntimeRunning();
+  cleanupOrphans();
   initDatabase();
   logger.info('Database initialized');
   loadState();
@@ -429,6 +477,7 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    removePidFile();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
@@ -445,9 +494,11 @@ async function main(): Promise<void> {
   };
 
   // Create and connect channels
-  whatsapp = new WhatsAppChannel(channelOpts);
-  channels.push(whatsapp);
-  await whatsapp.connect();
+  if (SIGNAL_PHONE_NUMBER) {
+    const signal = new SignalChannel(SIGNAL_API_URL, SIGNAL_PHONE_NUMBER, channelOpts);
+    channels.push(signal);
+    await signal.connect();
+  }
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
@@ -457,10 +508,7 @@ async function main(): Promise<void> {
     onProcess: (groupJid, proc, containerName, groupFolder) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
       const channel = findChannel(channels, jid);
-      if (!channel) {
-        console.log(`Warning: no channel owns JID ${jid}, cannot send message`);
-        return;
-      }
+      if (!channel) return;
       const text = formatOutbound(rawText);
       if (text) await channel.sendMessage(jid, text);
     },
@@ -471,18 +519,29 @@ async function main(): Promise<void> {
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
     },
+    sendReaction: (jid, emoji, targetTimestamp, targetAuthor) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (channel.sendReaction) {
+        return channel.sendReaction(jid, emoji, targetTimestamp, targetAuthor);
+      }
+      return Promise.resolve(); // Channel doesn't support reactions
+    },
+    sendImage: (jid, imagePath, caption) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (channel.sendImage) return channel.sendImage(jid, imagePath, caption);
+      return Promise.resolve(); // Channel doesn't support images
+    },
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
+    syncGroupMetadata: () => Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
-  startMessageLoop().catch((err) => {
-    logger.fatal({ err }, 'Message loop crashed unexpectedly');
-    process.exit(1);
-  });
+  startMessageLoop();
 }
 
 // Guard: only run when executed directly, not when imported by tests

@@ -231,7 +231,7 @@ export class WhatsAppChannel implements Channel {
     return this.connected;
   }
 
-  ownsJid(jid: string): boolean {
+  handlesJid(jid: string): boolean {
     return jid.endsWith('@g.us') || jid.endsWith('@s.whatsapp.net');
   }
 

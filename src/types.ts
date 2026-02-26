@@ -1,3 +1,10 @@
+export interface Attachment {
+  /** Absolute path on host filesystem */
+  hostPath: string;
+  contentType: string;
+  filename?: string;
+}
+
 export interface AdditionalMount {
   hostPath: string; // Absolute path on host (supports ~ for home)
   containerPath?: string; // Optional — defaults to basename of hostPath. Mounted at /workspace/extra/{value}
@@ -30,6 +37,7 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  memory?: string; // Container memory limit, e.g. '4GiB'. Default: '4GiB'
 }
 
 export interface RegisteredGroup {
@@ -50,6 +58,8 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  is_reply_to_bot?: boolean;
+  attachments?: Attachment[];
 }
 
 export interface ScheduledTask {
@@ -83,10 +93,14 @@ export interface Channel {
   connect(): Promise<void>;
   sendMessage(jid: string, text: string): Promise<void>;
   isConnected(): boolean;
-  ownsJid(jid: string): boolean;
+  handlesJid(jid: string): boolean;
   disconnect(): Promise<void>;
-  // Optional: typing indicator. Channels that support it implement it.
-  setTyping?(jid: string, isTyping: boolean): Promise<void>;
+  // Optional: send an image with optional caption.
+  sendImage?(jid: string, imagePath: string, caption?: string): Promise<void>;
+  // Optional: react to a message with an emoji.
+  sendReaction?(jid: string, emoji: string, targetTimestamp: number, targetAuthor: string): Promise<void>;
+  // Optional: set a reply target so the next sendMessage quotes this message.
+  setReplyTarget?(jid: string, messageId: string): void;
 }
 
 // Callback type that channels use to deliver inbound messages

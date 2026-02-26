@@ -63,6 +63,67 @@ server.tool(
 );
 
 server.tool(
+  'send_reaction',
+  'React to a specific message with an emoji. Use the message id from the conversation to identify which message to react to. Common reactions: ✅ (done/acknowledged), 👍 (agreed), ❤️ (love), 😂 (funny). Only works on Signal messages.',
+  {
+    emoji: z.string().describe('The emoji to react with (e.g., "✅", "👍")'),
+    message_id: z.string().describe('The message id from the conversation XML (e.g., "1771853168333-+15559990000")'),
+  },
+  async (args) => {
+    const data = {
+      type: 'reaction',
+      chatJid,
+      emoji: args.emoji,
+      messageId: args.message_id,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: `Reaction ${args.emoji} sent.` }] };
+  },
+);
+
+server.tool(
+  'send_image',
+  'Send an image file to the current chat. The image must be a file in /workspace/ that you have written or that exists in the workspace. Supported formats: JPEG, PNG, GIF, WebP.',
+  {
+    image_path: z.string().describe('Absolute path to the image file in /workspace/ (e.g., /workspace/group/output.png)'),
+    caption: z.string().optional().describe('Optional caption text to send with the image'),
+  },
+  async (args) => {
+    // Validate path is within workspace
+    if (!args.image_path.startsWith('/workspace/')) {
+      return {
+        content: [{ type: 'text' as const, text: 'Error: image_path must be within /workspace/' }],
+        isError: true,
+      };
+    }
+
+    if (!fs.existsSync(args.image_path)) {
+      return {
+        content: [{ type: 'text' as const, text: `Error: file not found: ${args.image_path}` }],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'image',
+      chatJid,
+      imagePath: args.image_path,
+      caption: args.caption || undefined,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: `Image sent: ${path.basename(args.image_path)}` }] };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools.
 

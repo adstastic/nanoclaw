@@ -816,25 +816,25 @@ describe('WhatsAppChannel', () => {
 
   // --- JID ownership ---
 
-  describe('ownsJid', () => {
-    it('owns @g.us JIDs (WhatsApp groups)', () => {
+  describe('handlesJid', () => {
+    it('handles @g.us JIDs (WhatsApp groups)', () => {
       const channel = new WhatsAppChannel(createTestOpts());
-      expect(channel.ownsJid('12345@g.us')).toBe(true);
+      expect(channel.handlesJid('12345@g.us')).toBe(true);
     });
 
-    it('owns @s.whatsapp.net JIDs (WhatsApp DMs)', () => {
+    it('handles @s.whatsapp.net JIDs (WhatsApp DMs)', () => {
       const channel = new WhatsAppChannel(createTestOpts());
-      expect(channel.ownsJid('12345@s.whatsapp.net')).toBe(true);
+      expect(channel.handlesJid('12345@s.whatsapp.net')).toBe(true);
     });
 
-    it('does not own Telegram JIDs', () => {
+    it('does not handle Telegram JIDs', () => {
       const channel = new WhatsAppChannel(createTestOpts());
-      expect(channel.ownsJid('tg:12345')).toBe(false);
+      expect(channel.handlesJid('tg:12345')).toBe(false);
     });
 
-    it('does not own unknown JID formats', () => {
+    it('does not handle unknown JID formats', () => {
       const channel = new WhatsAppChannel(createTestOpts());
-      expect(channel.ownsJid('random-string')).toBe(false);
+      expect(channel.handlesJid('random-string')).toBe(false);
     });
   });
 

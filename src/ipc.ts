@@ -5,18 +5,47 @@ import { CronExpressionParser } from 'cron-parser';
 
 import {
   DATA_DIR,
+  GROUPS_DIR,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
   TIMEZONE,
 } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import { parseSignalMessageId } from './router.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
+/**
+ * Map a container-relative path back to its host filesystem location.
+ * Includes path traversal protection — resolved path must stay within the expected base.
+ */
+function containerToHostPath(containerPath: string, groupFolder: string): string {
+  let baseDir: string;
+  let relative: string;
+
+  if (containerPath.startsWith('/workspace/ipc/')) {
+    baseDir = path.join(DATA_DIR, 'ipc', groupFolder);
+    relative = containerPath.slice('/workspace/ipc/'.length);
+  } else if (containerPath.startsWith('/workspace/group/')) {
+    baseDir = path.join(GROUPS_DIR, groupFolder);
+    relative = containerPath.slice('/workspace/group/'.length);
+  } else {
+    throw new Error(`Cannot map container path to host: ${containerPath}`);
+  }
+
+  const resolved = path.resolve(baseDir, relative);
+  if (!resolved.startsWith(baseDir + path.sep) && resolved !== baseDir) {
+    throw new Error(`Path traversal detected: ${containerPath}`);
+  }
+  return resolved;
+}
+
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendReaction?: (jid: string, emoji: string, targetTimestamp: number, targetAuthor: string) => Promise<void>;
+  sendImage?: (jid: string, imagePath: string, caption?: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroupMetadata: (force: boolean) => Promise<void>;
@@ -67,7 +96,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
         if (fs.existsSync(messagesDir)) {
           const messageFiles = fs
             .readdirSync(messagesDir)
-            .filter((f) => f.endsWith('.json'));
+            .filter((f) => f.endsWith('.json'))
+            .sort();
           for (const file of messageFiles) {
             const filePath = path.join(messagesDir, file);
             try {
@@ -88,6 +118,60 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
+                  );
+                }
+              } else if (data.type === 'reaction' && data.chatJid && data.emoji && data.messageId && deps.sendReaction) {
+                const parsed = parseSignalMessageId(data.messageId as string);
+                if (parsed) {
+                  const targetGroup = registeredGroups[data.chatJid];
+                  if (
+                    isMain ||
+                    (targetGroup && targetGroup.folder === sourceGroup)
+                  ) {
+                    await deps.sendReaction(data.chatJid, data.emoji as string, parsed.timestamp, parsed.author);
+                    logger.info(
+                      { chatJid: data.chatJid, emoji: data.emoji, sourceGroup },
+                      'IPC reaction sent',
+                    );
+                  } else {
+                    logger.warn(
+                      { chatJid: data.chatJid, sourceGroup },
+                      'Unauthorized IPC reaction attempt blocked',
+                    );
+                  }
+                } else {
+                  logger.warn({ messageId: data.messageId }, 'Invalid message ID for reaction');
+                }
+              } else if (data.type === 'image' && data.chatJid && data.imagePath && deps.sendImage) {
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  try {
+                    const hostPath = containerToHostPath(data.imagePath as string, sourceGroup);
+                    if (fs.existsSync(hostPath)) {
+                      await deps.sendImage(data.chatJid, hostPath, data.caption as string | undefined);
+                      logger.info(
+                        { chatJid: data.chatJid, sourceGroup },
+                        'IPC image sent',
+                      );
+                    } else {
+                      logger.error(
+                        { imagePath: data.imagePath, hostPath, sourceGroup },
+                        'IPC image file not found on host',
+                      );
+                    }
+                  } catch (err) {
+                    logger.error(
+                      { imagePath: data.imagePath, sourceGroup, err },
+                      'Failed to map or send IPC image',
+                    );
+                  }
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC image attempt blocked',
                   );
                 }
               }

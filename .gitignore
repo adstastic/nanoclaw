@@ -9,13 +9,10 @@ store/
 data/
 logs/
 
-# Groups - only track base structure and specific CLAUDE.md files
+# Groups - ignore all group contents except shared agent interaction config
 groups/*
-!groups/main/
-!groups/global/
-groups/main/*
-groups/global/*
-!groups/main/CLAUDE.md
+!groups/*/
+groups/*/*
 !groups/global/CLAUDE.md
 
 # Secrets

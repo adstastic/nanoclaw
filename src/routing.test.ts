@@ -22,6 +22,49 @@ describe('JID ownership patterns', () => {
     const jid = '12345678@s.whatsapp.net';
     expect(jid.endsWith('@s.whatsapp.net')).toBe(true);
   });
+
+  it('Telegram JID: starts with tg:', () => {
+    const jid = 'tg:123456789';
+    expect(jid.startsWith('tg:')).toBe(true);
+  });
+
+  it('Telegram group JID: starts with tg: and has negative ID', () => {
+    const jid = 'tg:-1001234567890';
+    expect(jid.startsWith('tg:')).toBe(true);
+  });
+});
+
+// --- Signal JID routing ---
+
+describe('Signal JID routing', () => {
+  // Mock channel implementing the Channel interface's handlesJid method
+  function makeSignalChannel() {
+    return {
+      name: 'signal',
+      handlesJid: (jid: string) => jid.startsWith('sig:'),
+    };
+  }
+
+  it('sig:+phone JID is handled by SignalChannel', () => {
+    const channel = makeSignalChannel();
+    expect(channel.handlesJid('sig:+447447518300')).toBe(true);
+  });
+
+  it('sig:group.xxx JID is handled by SignalChannel', () => {
+    const channel = makeSignalChannel();
+    expect(channel.handlesJid('sig:group.azY5SzhQbmFRV1VlWlIwWjdBYnFVdz09')).toBe(true);
+  });
+
+  it('SignalChannel does not handle WhatsApp JIDs', () => {
+    const channel = makeSignalChannel();
+    expect(channel.handlesJid('12345678@g.us')).toBe(false);
+    expect(channel.handlesJid('12345678@s.whatsapp.net')).toBe(false);
+  });
+
+  it('SignalChannel does not handle Telegram JIDs', () => {
+    const channel = makeSignalChannel();
+    expect(channel.handlesJid('tg:123456789')).toBe(false);
+  });
 });
 
 // --- getAvailableGroups ---
@@ -96,5 +139,56 @@ describe('getAvailableGroups', () => {
   it('returns empty array when no chats exist', () => {
     const groups = getAvailableGroups();
     expect(groups).toHaveLength(0);
+  });
+
+  it('includes Telegram chat JIDs', () => {
+    storeChatMetadata('tg:100200300', '2024-01-01T00:00:01.000Z', 'Telegram Chat', 'telegram', true);
+    storeChatMetadata('user@s.whatsapp.net', '2024-01-01T00:00:02.000Z', 'User DM', 'whatsapp', false);
+
+    const groups = getAvailableGroups();
+    expect(groups).toHaveLength(1);
+    expect(groups[0].jid).toBe('tg:100200300');
+  });
+
+  it('returns Telegram group JIDs with negative IDs', () => {
+    storeChatMetadata('tg:-1001234567890', '2024-01-01T00:00:01.000Z', 'TG Group', 'telegram', true);
+
+    const groups = getAvailableGroups();
+    expect(groups).toHaveLength(1);
+    expect(groups[0].jid).toBe('tg:-1001234567890');
+    expect(groups[0].name).toBe('TG Group');
+  });
+
+  it('marks registered Telegram chats correctly', () => {
+    storeChatMetadata('tg:100200300', '2024-01-01T00:00:01.000Z', 'TG Registered', 'telegram', true);
+    storeChatMetadata('tg:999999', '2024-01-01T00:00:02.000Z', 'TG Unregistered', 'telegram', true);
+
+    _setRegisteredGroups({
+      'tg:100200300': {
+        name: 'TG Registered',
+        folder: 'tg-registered',
+        trigger: '@Andy',
+        added_at: '2024-01-01T00:00:00.000Z',
+      },
+    });
+
+    const groups = getAvailableGroups();
+    const tgReg = groups.find((g) => g.jid === 'tg:100200300');
+    const tgUnreg = groups.find((g) => g.jid === 'tg:999999');
+
+    expect(tgReg?.isRegistered).toBe(true);
+    expect(tgUnreg?.isRegistered).toBe(false);
+  });
+
+  it('mixes WhatsApp and Telegram chats ordered by activity', () => {
+    storeChatMetadata('wa@g.us', '2024-01-01T00:00:01.000Z', 'WhatsApp', 'whatsapp', true);
+    storeChatMetadata('tg:100', '2024-01-01T00:00:03.000Z', 'Telegram', 'telegram', true);
+    storeChatMetadata('wa2@g.us', '2024-01-01T00:00:02.000Z', 'WhatsApp 2', 'whatsapp', true);
+
+    const groups = getAvailableGroups();
+    expect(groups).toHaveLength(3);
+    expect(groups[0].jid).toBe('tg:100');
+    expect(groups[1].jid).toBe('wa2@g.us');
+    expect(groups[2].jid).toBe('wa@g.us');
   });
 });

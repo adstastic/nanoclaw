@@ -18,6 +18,18 @@ import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { detectImageContentType } from './content-type.js';
+
+type TextContentBlock = { type: 'text'; text: string };
+type ImageContentBlock = {
+  type: 'image';
+  source: { type: 'base64'; media_type: string; data: string };
+};
+type DocumentContentBlock = {
+  type: 'document';
+  source: { type: 'base64'; media_type: string; data: string };
+};
+type ContentBlock = TextContentBlock | ImageContentBlock | DocumentContentBlock;
 
 interface ContainerInput {
   prompt: string;
@@ -28,6 +40,7 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   secrets?: Record<string, string>;
+  attachments?: { containerPath: string; contentType: string }[];
 }
 
 interface ContainerOutput {
@@ -50,7 +63,7 @@ interface SessionsIndex {
 
 interface SDKUserMessage {
   type: 'user';
-  message: { role: 'user'; content: string };
+  message: { role: 'user'; content: string | ContentBlock[] };
   parent_tool_use_id: null;
   session_id: string;
 }
@@ -68,10 +81,10 @@ class MessageStream {
   private waiting: (() => void) | null = null;
   private done = false;
 
-  push(text: string): void {
+  push(content: string | ContentBlock[]): void {
     this.queue.push({
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       session_id: '',
     });
@@ -186,8 +199,9 @@ function createPreCompactHook(assistantName?: string): HookCallback {
 }
 
 // Secrets to strip from Bash tool subprocess environments.
-// These are needed by claude-code for API auth but should never
-// be visible to commands Kit runs.
+// Prevents leakage of sensitive credentials to arbitrary commands the agent runs.
+// GH_TOKEN is intentionally omitted — it's a BASH_SAFE_SECRET explicitly
+// exposed so the agent can use gh CLI for legitimate tool use.
 const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
 
 function createSanitizeBashHook(): HookCallback {
@@ -295,24 +309,78 @@ function shouldClose(): boolean {
 }
 
 /**
+ * Build content block array for Claude's API.
+ * - image/* → image block (vision)
+ * - application/pdf → document block (native PDF reading)
+ * - text/* → text block (UTF-8 content inlined)
+ * - else → text note with container path for Bash/Read tool use
+ */
+function buildContentBlocks(
+  text: string,
+  attachments: { containerPath: string; contentType: string }[],
+): ContentBlock[] {
+  const blocks: ContentBlock[] = [{ type: 'text', text }];
+  for (const att of attachments) {
+    const ct = att.contentType;
+    try {
+      if (ct.startsWith('image/')) {
+        const actualCt = detectImageContentType(att.containerPath, ct);
+        const data = fs.readFileSync(att.containerPath, 'base64');
+        blocks.push({
+          type: 'image',
+          source: { type: 'base64', media_type: actualCt, data },
+        });
+      } else if (ct === 'application/pdf') {
+        const data = fs.readFileSync(att.containerPath, 'base64');
+        blocks.push({
+          type: 'document',
+          source: { type: 'base64', media_type: 'application/pdf', data },
+        });
+      } else if (ct.startsWith('text/')) {
+        const fileText = fs.readFileSync(att.containerPath, 'utf-8');
+        const header = `[File: ${path.basename(att.containerPath)}]\n`;
+        blocks.push({ type: 'text', text: header + fileText });
+      } else {
+        // Binary file — agent uses Bash/Read tools to process it
+        blocks.push({
+          type: 'text',
+          text: `[Attached file: ${att.containerPath} (${ct}) — use Bash or Read tools to process]`,
+        });
+      }
+    } catch (err) {
+      log(`Failed to read attachment ${att.containerPath}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return blocks;
+}
+
+interface IpcInputMessage {
+  text: string;
+  attachments?: { containerPath: string; contentType: string }[];
+}
+
+/**
  * Drain all pending IPC input messages.
  * Returns messages found, or empty array.
  */
-function drainIpcInput(): string[] {
+function drainIpcInput(): IpcInputMessage[] {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs.readdirSync(IPC_INPUT_DIR)
       .filter(f => f.endsWith('.json'))
       .sort();
 
-    const messages: string[] = [];
+    const messages: IpcInputMessage[] = [];
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
         if (data.type === 'message' && data.text) {
-          messages.push(data.text);
+          messages.push({
+            text: data.text,
+            attachments: data.attachments,
+          });
         }
       } catch (err) {
         log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
@@ -328,9 +396,9 @@ function drainIpcInput(): string[] {
 
 /**
  * Wait for a new IPC message or _close sentinel.
- * Returns the messages as a single string, or null if _close.
+ * Returns structured messages, or null if _close.
  */
-function waitForIpcMessage(): Promise<string | null> {
+function waitForIpcMessage(): Promise<IpcInputMessage[] | null> {
   return new Promise((resolve) => {
     const poll = () => {
       if (shouldClose()) {
@@ -339,7 +407,7 @@ function waitForIpcMessage(): Promise<string | null> {
       }
       const messages = drainIpcInput();
       if (messages.length > 0) {
-        resolve(messages.join('\n'));
+        resolve(messages);
         return;
       }
       setTimeout(poll, IPC_POLL_MS);
@@ -355,7 +423,7 @@ function waitForIpcMessage(): Promise<string | null> {
  * Also pipes IPC messages into the stream during the query.
  */
 async function runQuery(
-  prompt: string,
+  prompt: string | ContentBlock[],
   sessionId: string | undefined,
   mcpServerPath: string,
   containerInput: ContainerInput,
@@ -378,9 +446,13 @@ async function runQuery(
       return;
     }
     const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
+    for (const msg of messages) {
+      log(`Piping IPC message into active query (${msg.text.length} chars)`);
+      if (msg.attachments && msg.attachments.length > 0) {
+        stream.push(buildContentBlocks(msg.text, msg.attachments));
+      } else {
+        stream.push(msg.text);
+      }
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
@@ -417,6 +489,7 @@ async function runQuery(
   for await (const message of query({
     prompt: stream,
     options: {
+      model: 'claude-sonnet-4-6',
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
@@ -515,6 +588,16 @@ async function main(): Promise<void> {
     sdkEnv[key] = value;
   }
 
+  // Expose scoped tool tokens to process.env so Bash subprocesses (gh, etc.) can use them.
+  // These are scoped tool tokens (not Claude auth credentials) — safe to expose to Bash subprocesses.
+  // Never put API keys or OAuth tokens here.
+  const BASH_SAFE_SECRETS = ['GH_TOKEN'];
+  for (const key of BASH_SAFE_SECRETS) {
+    if (containerInput.secrets?.[key]) {
+      process.env[key] = containerInput.secrets[key];
+    }
+  }
+
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
 
@@ -525,15 +608,29 @@ async function main(): Promise<void> {
   try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
 
   // Build initial prompt (drain any pending IPC messages too)
-  let prompt = containerInput.prompt;
+  let promptText = containerInput.prompt;
   if (containerInput.isScheduledTask) {
-    prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
+    promptText = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${promptText}`;
   }
+
+  // Collect attachments from container input and pending IPC messages
+  const allAttachments: { containerPath: string; contentType: string }[] = [
+    ...(containerInput.attachments || []),
+  ];
+
   const pending = drainIpcInput();
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.join('\n');
+    for (const msg of pending) {
+      promptText += '\n' + msg.text;
+      if (msg.attachments) allAttachments.push(...msg.attachments);
+    }
   }
+
+  // Build initial content (text-only or text+images)
+  let queryInput: string | ContentBlock[] = allAttachments.length > 0
+    ? buildContentBlocks(promptText, allAttachments)
+    : promptText;
 
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;
@@ -541,7 +638,7 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult = await runQuery(queryInput, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
@@ -563,14 +660,18 @@ async function main(): Promise<void> {
       log('Query ended, waiting for next IPC message...');
 
       // Wait for the next message or _close sentinel
-      const nextMessage = await waitForIpcMessage();
-      if (nextMessage === null) {
+      const nextMessages = await waitForIpcMessage();
+      if (nextMessages === null) {
         log('Close sentinel received, exiting');
         break;
       }
 
-      log(`Got new message (${nextMessage.length} chars), starting new query`);
-      prompt = nextMessage;
+      const nextText = nextMessages.map(m => m.text).join('\n');
+      const nextAttachments = nextMessages.flatMap(m => m.attachments || []);
+      log(`Got new message (${nextText.length} chars, ${nextAttachments.length} attachments), starting new query`);
+      queryInput = nextAttachments.length > 0
+        ? buildContentBlocks(nextText, nextAttachments)
+        : nextText;
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);

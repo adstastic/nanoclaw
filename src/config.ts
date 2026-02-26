@@ -9,6 +9,8 @@ import { readEnvFile } from './env.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'SIGNAL_API_URL',
+  'SIGNAL_PHONE_NUMBER',
 ]);
 
 export const ASSISTANT_NAME =
@@ -32,7 +34,7 @@ export const MOUNT_ALLOWLIST_PATH = path.join(
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
-export const MAIN_GROUP_FOLDER = 'main';
+export const MAIN_GROUP_FOLDER = 'personal';
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
@@ -63,7 +65,19 @@ export const TRIGGER_PATTERN = new RegExp(
   'i',
 );
 
+/** Build a trigger regex from a group's trigger string (e.g. "@g" → /^@g\b/i). */
+export function groupTriggerPattern(trigger: string): RegExp {
+  return new RegExp(`^${escapeRegex(trigger)}\\b`, 'i');
+}
+
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// Signal configuration
+export const SIGNAL_API_URL =
+  process.env.SIGNAL_API_URL || envConfig.SIGNAL_API_URL || 'http://localhost:8080';
+export const SIGNAL_PHONE_NUMBER =
+  process.env.SIGNAL_PHONE_NUMBER || envConfig.SIGNAL_PHONE_NUMBER || '';
+

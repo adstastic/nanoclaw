@@ -14,6 +14,7 @@ vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
+  STORE_DIR: '/tmp/nanoclaw-test-store',
   TIMEZONE: 'America/Los_Angeles',
 }));
 
@@ -50,6 +51,12 @@ vi.mock('./mount-security.js', () => ({
   validateAdditionalMounts: vi.fn(() => []),
 }));
 
+// Mock env.js — controls what readSecrets sees as "global" secrets
+const mockReadEnvFile = vi.fn<(keys: string[]) => Record<string, string>>(() => ({}));
+vi.mock('./env.js', () => ({
+  readEnvFile: (keys: string[]) => mockReadEnvFile(keys),
+}));
+
 // Create a controllable fake ChildProcess
 function createFakeProcess() {
   const proc = new EventEmitter() as EventEmitter & {
@@ -82,8 +89,11 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { runContainerAgent, ContainerOutput } from './container-runner.js';
-import type { RegisteredGroup } from './types.js';
+import fs from 'fs';
+import { runContainerAgent, readSecrets, prepareAttachmentsForContainer, ContainerOutput } from './container-runner.js';
+import type { RegisteredGroup, NewMessage } from './types.js';
+
+const mockedFs = vi.mocked(fs);
 
 const testGroup: RegisteredGroup = {
   name: 'Test Group',
@@ -199,5 +209,132 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+});
+
+describe('readSecrets per-group overrides', () => {
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('group .env value takes precedence over global for the same key', () => {
+    mockReadEnvFile.mockReturnValue({
+      GH_TOKEN: 'global-token-secret',
+      ANTHROPIC_API_KEY: 'global-api-key',
+    });
+    mockedFs.readFileSync.mockReturnValue('GH_TOKEN=scoped-token\n');
+
+    const secrets = readSecrets('feedback');
+
+    expect(secrets.GH_TOKEN).toBe('scoped-token');
+    expect(secrets.GH_TOKEN).not.toBe('global-token-secret');
+    expect(secrets.ANTHROPIC_API_KEY).toBe('global-api-key');
+  });
+
+  it('falls back to global secrets when no group .env exists', () => {
+    mockReadEnvFile.mockReturnValue({
+      GH_TOKEN: 'global-token',
+      ANTHROPIC_API_KEY: 'global-api-key',
+    });
+    mockedFs.readFileSync.mockImplementation(() => {
+      throw new Error('ENOENT');
+    });
+
+    const secrets = readSecrets('no-env-group');
+
+    expect(secrets.GH_TOKEN).toBe('global-token');
+    expect(secrets.ANTHROPIC_API_KEY).toBe('global-api-key');
+  });
+
+  it('group .env only overrides keys it defines', () => {
+    mockReadEnvFile.mockReturnValue({
+      GH_TOKEN: 'global-gh',
+      ANTHROPIC_API_KEY: 'global-anthropic',
+      CLAUDE_CODE_OAUTH_TOKEN: 'global-oauth',
+    });
+    mockedFs.readFileSync.mockReturnValue('GH_TOKEN=scoped-gh\n');
+
+    const secrets = readSecrets('feedback');
+
+    expect(secrets.GH_TOKEN).toBe('scoped-gh');
+    expect(secrets.ANTHROPIC_API_KEY).toBe('global-anthropic');
+    expect(secrets.CLAUDE_CODE_OAUTH_TOKEN).toBe('global-oauth');
+  });
+
+  it('ignores unknown keys in group .env', () => {
+    mockReadEnvFile.mockReturnValue({ GH_TOKEN: 'global' });
+    mockedFs.readFileSync.mockReturnValue('GH_TOKEN=scoped\nRANDOM_SECRET=should-not-appear\n');
+
+    const secrets = readSecrets('feedback');
+
+    expect(secrets.GH_TOKEN).toBe('scoped');
+    expect(secrets).not.toHaveProperty('RANDOM_SECRET');
+  });
+});
+
+describe('prepareAttachmentsForContainer', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedFs.mkdirSync.mockReturnValue(undefined as any);
+    mockedFs.copyFileSync.mockReturnValue(undefined);
+  });
+
+  it('copies attachment to IPC dir and returns container path with original content type', () => {
+    const messages: NewMessage[] = [{
+      id: 'msg-001',
+      chat_jid: 'sig:+1234',
+      sender: '+1234',
+      sender_name: 'Alice',
+      content: 'here [Image: photo.jpg]',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: false,
+      attachments: [{ hostPath: '/store/attachments/msg-001/0.jpg', contentType: 'image/jpeg', filename: 'photo.jpg' }],
+    }];
+
+    const result = prepareAttachmentsForContainer(messages, 'main');
+
+    expect(result).toEqual([{
+      containerPath: '/workspace/ipc/attachments/msg-001/photo.jpg',
+      contentType: 'image/jpeg',
+    }]);
+    expect(mockedFs.copyFileSync).toHaveBeenCalledWith(
+      '/store/attachments/msg-001/0.jpg',
+      expect.stringContaining('msg-001/photo.jpg'),
+    );
+  });
+
+  it('uses hostPath basename as filename when filename not set', () => {
+    const messages: NewMessage[] = [{
+      id: 'msg-002',
+      chat_jid: 'sig:+1234',
+      sender: '+1234',
+      sender_name: 'Alice',
+      content: 'doc',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: false,
+      attachments: [{ hostPath: '/store/attachments/msg-002/0.pdf', contentType: 'application/pdf' }],
+    }];
+
+    const result = prepareAttachmentsForContainer(messages, 'main');
+
+    expect(result[0].containerPath).toBe('/workspace/ipc/attachments/msg-002/0.pdf');
+    expect(result[0].contentType).toBe('application/pdf');
+  });
+
+  it('skips messages with no attachments', () => {
+    const messages: NewMessage[] = [{
+      id: 'msg-003',
+      chat_jid: 'sig:+1234',
+      sender: '+1234',
+      sender_name: 'Alice',
+      content: 'just text',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: false,
+    }];
+
+    const result = prepareAttachmentsForContainer(messages, 'main');
+    expect(result).toEqual([]);
+    expect(mockedFs.copyFileSync).not.toHaveBeenCalled();
   });
 });
