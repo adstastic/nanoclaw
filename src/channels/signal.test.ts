@@ -1116,6 +1116,34 @@ describe('SignalChannel', () => {
         }),
       );
     });
+
+    it('uses unavailable fallback when audio download fails', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      // Make the download API call return a non-ok response
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: '',
+          attachments: [{ contentType: 'audio/ogg', id: 'audio-fail' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: '[Voice: transcription unavailable]',
+          attachments: undefined,
+        }),
+      );
+      // transcribeAudio must not be called when download fails
+      expect(vi.mocked(transcribeAudio).mock.calls.length).toBe(0);
+    });
   });
 
   // --- sendMessage ---
