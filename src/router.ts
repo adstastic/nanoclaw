@@ -31,7 +31,7 @@ export function routeOutbound(
   jid: string,
   text: string,
 ): Promise<void> {
-  const channel = channels.find((c) => c.ownsJid(jid) && c.isConnected());
+  const channel = channels.find((c) => c.handlesJid(jid) && c.isConnected());
   if (!channel) throw new Error(`No channel for JID: ${jid}`);
   return channel.sendMessage(jid, text);
 }
@@ -42,7 +42,7 @@ export function routeOutboundImage(
   imagePath: string,
   caption?: string,
 ): Promise<void> {
-  const channel = channels.find((c) => c.ownsJid(jid) && c.isConnected());
+  const channel = channels.find((c) => c.handlesJid(jid) && c.isConnected());
   if (!channel) throw new Error(`No channel for JID: ${jid}`);
   if (!channel.sendImage) throw new Error(`Channel ${channel.name} does not support sending images`);
   return channel.sendImage(jid, imagePath, caption);
@@ -52,7 +52,7 @@ export function findChannel(
   channels: Channel[],
   jid: string,
 ): Channel | undefined {
-  return channels.find((c) => c.ownsJid(jid));
+  return channels.find((c) => c.handlesJid(jid));
 }
 
 /**

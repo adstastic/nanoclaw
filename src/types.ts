@@ -93,10 +93,8 @@ export interface Channel {
   connect(): Promise<void>;
   sendMessage(jid: string, text: string): Promise<void>;
   isConnected(): boolean;
-  ownsJid(jid: string): boolean;
+  handlesJid(jid: string): boolean;
   disconnect(): Promise<void>;
-  // Optional: typing indicator. Channels that support it implement it.
-  setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: send an image with optional caption.
   sendImage?(jid: string, imagePath: string, caption?: string): Promise<void>;
   // Optional: react to a message with an emoji.

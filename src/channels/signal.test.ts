@@ -807,7 +807,7 @@ describe('SignalChannel', () => {
       );
     });
 
-    it('falls back to truncated body when long-message download fails', async () => {
+    it('falls back to truncated body with note when long-message download fails', async () => {
       const opts = createTestOpts();
       const channel = new SignalChannel(
         'http://localhost:8080',
@@ -828,10 +828,12 @@ describe('SignalChannel', () => {
       );
       await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
 
-      // Should still deliver the truncated body, not append [Attachment]
+      // Should prepend note and deliver truncated body
       expect(opts.onMessage).toHaveBeenCalledWith(
         'sig:+15559990000',
-        expect.objectContaining({ content: 'Truncated body' }),
+        expect.objectContaining({
+          content: '[Note: long message — full text unavailable, showing partial content]\nTruncated body',
+        }),
       );
     });
 
@@ -930,40 +932,29 @@ describe('SignalChannel', () => {
       );
     });
 
-    it('downloads an unknown-type attachment and includes path hint in content', async () => {
-      const zipBytes = Buffer.from('PK fake zip');
-
+    it('skips unsupported attachment types (e.g. application/zip) without downloading', async () => {
       const opts = createTestOpts();
       const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
       const ws = await connectChannel(channel);
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        arrayBuffer: async () => zipBytes.buffer,
-      });
-
       ws._emitMessage(
         makeEnvelope({
           source: '+15559990000',
-          message: '',
+          message: 'Check this out',
           attachments: [{ contentType: 'application/zip', id: 'zip-456', filename: 'archive.zip' }],
         }),
       );
       await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
 
-      // File written to correct index-based path (not att.filename)
-      expect(vi.mocked(fs.writeFileSync)).toHaveBeenCalledWith(
-        expect.stringContaining('0.bin'),
-        expect.any(Buffer),
-      );
+      // No file download attempted for unsupported type
+      expect(vi.mocked(fs.writeFileSync)).not.toHaveBeenCalled();
 
+      // Message delivered with original text, no attachment label
       expect(opts.onMessage).toHaveBeenCalledWith(
         'sig:+15559990000',
         expect.objectContaining({
-          content: expect.stringContaining('[File: archive.zip]'),
-          attachments: expect.arrayContaining([
-            expect.objectContaining({ contentType: 'application/zip' }),
-          ]),
+          content: 'Check this out',
+          attachments: undefined,
         }),
       );
     });
@@ -1129,137 +1120,52 @@ describe('SignalChannel', () => {
     });
   });
 
-  // --- setTyping ---
+  // --- handlesJid ---
 
-  describe('setTyping', () => {
-    it('sends PUT for typing start on DM', async () => {
-      const opts = createTestOpts();
-      const channel = new SignalChannel(
-        'http://localhost:8080',
-        '+15551234567',
-        opts,
-      );
-      await connectChannel(channel);
-
-      mockFetch.mockResolvedValueOnce({ ok: true });
-      await channel.setTyping('sig:+15559990000', true);
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'http://localhost:8080/v1/typing-indicator/+15551234567',
-        expect.objectContaining({ method: 'PUT' }),
-      );
-
-      const typingCall = mockFetch.mock.calls.find(
-        (c: any) =>
-          typeof c[0] === 'string' && c[0].includes('typing-indicator'),
-      ) as any;
-      const body = JSON.parse(typingCall[1].body);
-      expect(body.recipient).toBe('+15559990000');
-    });
-
-    it('sends DELETE for typing stop', async () => {
-      const opts = createTestOpts();
-      const channel = new SignalChannel(
-        'http://localhost:8080',
-        '+15551234567',
-        opts,
-      );
-      await connectChannel(channel);
-
-      mockFetch.mockResolvedValueOnce({ ok: true });
-      await channel.setTyping('sig:+15559990000', false);
-
-      const typingCall = mockFetch.mock.calls.find(
-        (c: any) =>
-          typeof c[0] === 'string' && c[0].includes('typing-indicator'),
-      ) as any;
-      expect(typingCall[1].method).toBe('DELETE');
-    });
-
-    it('sends group typing indicator with group field', async () => {
-      const opts = createTestOpts();
-      const channel = new SignalChannel(
-        'http://localhost:8080',
-        '+15551234567',
-        opts,
-      );
-      await connectChannel(channel);
-
-      mockFetch.mockResolvedValueOnce({ ok: true });
-      await channel.setTyping('sig:group.Z3JvdXBBQkMxMjM=', true);
-
-      const typingCall = mockFetch.mock.calls.find(
-        (c: any) =>
-          typeof c[0] === 'string' && c[0].includes('typing-indicator'),
-      ) as any;
-      const body = JSON.parse(typingCall[1].body);
-      expect(body.group).toBe('groupABC123');
-      expect(body.recipient).toBeUndefined();
-    });
-
-    it('handles typing indicator failure gracefully', async () => {
-      const opts = createTestOpts();
-      const channel = new SignalChannel(
-        'http://localhost:8080',
-        '+15551234567',
-        opts,
-      );
-      await connectChannel(channel);
-
-      mockFetch.mockRejectedValueOnce(new Error('Rate limited'));
-
-      await expect(
-        channel.setTyping('sig:+15559990000', true),
-      ).resolves.toBeUndefined();
-    });
-  });
-
-  // --- ownsJid ---
-
-  describe('ownsJid', () => {
-    it('owns sig: JIDs', () => {
+  describe('handlesJid', () => {
+    it('handles sig: JIDs', () => {
       const channel = new SignalChannel(
         'http://localhost:8080',
         '+15551234567',
         createTestOpts(),
       );
-      expect(channel.ownsJid('sig:+15559990000')).toBe(true);
+      expect(channel.handlesJid('sig:+15559990000')).toBe(true);
     });
 
-    it('owns sig: group JIDs', () => {
+    it('handles sig: group JIDs', () => {
       const channel = new SignalChannel(
         'http://localhost:8080',
         '+15551234567',
         createTestOpts(),
       );
-      expect(channel.ownsJid('sig:group.Z3JvdXBBQkMxMjM=')).toBe(true);
+      expect(channel.handlesJid('sig:group.Z3JvdXBBQkMxMjM=')).toBe(true);
     });
 
-    it('does not own tg: JIDs', () => {
+    it('does not handle tg: JIDs', () => {
       const channel = new SignalChannel(
         'http://localhost:8080',
         '+15551234567',
         createTestOpts(),
       );
-      expect(channel.ownsJid('tg:123456')).toBe(false);
+      expect(channel.handlesJid('tg:123456')).toBe(false);
     });
 
-    it('does not own WhatsApp JIDs', () => {
+    it('does not handle WhatsApp JIDs', () => {
       const channel = new SignalChannel(
         'http://localhost:8080',
         '+15551234567',
         createTestOpts(),
       );
-      expect(channel.ownsJid('12345@g.us')).toBe(false);
+      expect(channel.handlesJid('12345@g.us')).toBe(false);
     });
 
-    it('does not own unknown JID formats', () => {
+    it('does not handle unknown JID formats', () => {
       const channel = new SignalChannel(
         'http://localhost:8080',
         '+15551234567',
         createTestOpts(),
       );
-      expect(channel.ownsJid('random-string')).toBe(false);
+      expect(channel.handlesJid('random-string')).toBe(false);
     });
   });
 

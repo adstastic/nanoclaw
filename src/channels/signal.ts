@@ -289,30 +289,35 @@ export class SignalChannel implements Channel {
           }
         } catch (err) {
           logger.warn({ attachmentId: att.id, err }, 'Failed to download long-message attachment');
+          if (content) {
+            content = `[Note: long message — full text unavailable, showing partial content]\n${content}`;
+          } else {
+            content = '[Note: long message — full text unavailable, showing partial content]';
+          }
         }
-      } else if (IMAGE_CONTENT_TYPES.has(ct) && att.id) {
-        const ext = extFromContentType(ct);
-        const filename = att.filename || `image-${i}.${ext}`;
-        const attachDir = path.join(STORE_DIR, 'attachments', msgId);
-        const filePath = path.join(attachDir, `${i}.${ext}`);
-
-        const ok = await this.downloadAttachment(att.id, filePath);
-        if (ok) {
-          downloadedAttachments.push({ hostPath: filePath, contentType: ct, filename });
-        }
-        content = content ? `${content} [Image: ${filename}]` : `[Image: ${filename}]`;
       } else if (att.id) {
-        // Non-image, non-text attachment — download and surface path to agent
-        const ext = extFromContentType(ct);
-        const displayName = att.filename || `attachment-${i}.${ext}`;
-        const attachDir = path.join(STORE_DIR, 'attachments', msgId);
-        const filePath = path.join(attachDir, `${i}.${ext}`);
+        const ctBase = ct.split('/')[0];
+        const isSupported =
+          ctBase === 'image' ||
+          ct === 'application/pdf' ||
+          ctBase === 'text';
 
-        const ok = await this.downloadAttachment(att.id, filePath);
-        if (ok) {
-          downloadedAttachments.push({ hostPath: filePath, contentType: ct, filename: displayName });
+        if (!isSupported) {
+          logger.warn({ attachmentId: att.id, contentType: ct }, 'Skipping unsupported attachment type');
+        } else {
+          const ext = extFromContentType(ct);
+          const isImage = ctBase === 'image';
+          const displayName = att.filename || (isImage ? `image-${i}.${ext}` : `attachment-${i}.${ext}`);
+          const attachDir = path.join(STORE_DIR, 'attachments', msgId);
+          const filePath = path.join(attachDir, `${i}.${ext}`);
+
+          const ok = await this.downloadAttachment(att.id, filePath);
+          if (ok) {
+            downloadedAttachments.push({ hostPath: filePath, contentType: ct, filename: displayName });
+          }
+          const label = isImage ? `[Image: ${displayName}]` : `[File: ${displayName}]`;
+          content = content ? `${content} ${label}` : label;
         }
-        content = content ? `${content} [File: ${displayName}]` : `[File: ${displayName}]`;
       } else {
         // No id — can't download, show a type-appropriate placeholder
         const type = ct.split('/')[0];
@@ -545,36 +550,11 @@ export class SignalChannel implements Channel {
     }
   }
 
-  async setTyping(jid: string, isTyping: boolean): Promise<void> {
-    try {
-      const stripped = jid.replace(/^sig:/, '');
-      const method = isTyping ? 'PUT' : 'DELETE';
-
-      const body: any = {};
-      if (stripped.startsWith('+')) {
-        body.recipient = stripped;
-      } else if (stripped.startsWith('group.')) {
-        // Decode group.xxx back to internal ID for typing API
-        body.group = Buffer.from(stripped.slice('group.'.length), 'base64').toString('utf-8');
-      } else {
-        body.group = stripped;
-      }
-
-      await fetch(`${this.apiUrl}/v1/typing-indicator/${this.phoneNumber}`, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-    } catch (err) {
-      logger.debug({ jid, err }, 'Failed to send Signal typing indicator');
-    }
-  }
-
   isConnected(): boolean {
     return this.connected;
   }
 
-  ownsJid(jid: string): boolean {
+  handlesJid(jid: string): boolean {
     return jid.startsWith('sig:');
   }
 
