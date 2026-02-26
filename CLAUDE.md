@@ -86,8 +86,8 @@ npm run build && launchctl kickstart -k gui/$(id -u)/com.nanoclaw.agent
 # Check logs
 tail -f /tmp/nanoclaw.log
 
-# Kill stale containers
-container ls | grep nanoclaw | awk '{print $1}' | xargs -I{} container stop {}
+# Kill stale agent containers (grep ID column only, avoids matching whisper/signal-api by image name)
+container ls | awk 'NR>1 && $1 ~ /^nanoclaw-/ {print $1}' | xargs -I{} container stop {}
 ```
 
 ### After Code Changes
