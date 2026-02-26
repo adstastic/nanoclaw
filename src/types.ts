@@ -1,8 +1,6 @@
 export interface Attachment {
   /** Absolute path on host filesystem */
   hostPath: string;
-  /** Path inside container (set when preparing for container) */
-  containerPath?: string;
   contentType: string;
   filename?: string;
 }
