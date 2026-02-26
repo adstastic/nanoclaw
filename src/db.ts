@@ -126,6 +126,15 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+
+  // Add attachments column if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE messages ADD COLUMN attachments TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -249,7 +258,9 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, is_reply_to_bot) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages
+      (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, is_reply_to_bot, attachments)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -260,6 +271,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
     msg.is_reply_to_bot ? 1 : 0,
+    msg.attachments?.length ? JSON.stringify(msg.attachments) : null,
   );
 }
 
@@ -301,7 +313,7 @@ export function getNewMessages(
   // Filter bot messages using both the is_bot_message flag AND the content
   // prefix as a backstop for messages written before the migration ran.
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, is_reply_to_bot
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, is_reply_to_bot, attachments
     FROM messages
     WHERE timestamp > ? AND chat_jid IN (${placeholders})
       AND is_bot_message = 0 AND content NOT LIKE ?
@@ -311,14 +323,18 @@ export function getNewMessages(
 
   const rows = db
     .prepare(sql)
-    .all(lastTimestamp, ...jids, `${botPrefix}:%`) as NewMessage[];
+    .all(lastTimestamp, ...jids, `${botPrefix}:%`) as Array<Omit<NewMessage, 'attachments'> & { attachments: string | null }>;
 
   let newTimestamp = lastTimestamp;
-  for (const row of rows) {
+  const messages = rows.map((r) => ({
+    ...r,
+    attachments: r.attachments ? JSON.parse(r.attachments) : undefined,
+  }));
+  for (const row of messages) {
     if (row.timestamp > newTimestamp) newTimestamp = row.timestamp;
   }
 
-  return { messages: rows, newTimestamp };
+  return { messages, newTimestamp };
 }
 
 export function getMessagesSince(
@@ -329,16 +345,20 @@ export function getMessagesSince(
   // Filter bot messages using both the is_bot_message flag AND the content
   // prefix as a backstop for messages written before the migration ran.
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, is_reply_to_bot
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, is_reply_to_bot, attachments
     FROM messages
     WHERE chat_jid = ? AND timestamp > ?
       AND is_bot_message = 0 AND content NOT LIKE ?
       AND content != '' AND content IS NOT NULL
     ORDER BY timestamp
   `;
-  return db
+  const rows = db
     .prepare(sql)
-    .all(chatJid, sinceTimestamp, `${botPrefix}:%`) as NewMessage[];
+    .all(chatJid, sinceTimestamp, `${botPrefix}:%`) as Array<Omit<NewMessage, 'attachments'> & { attachments: string | null }>;
+  return rows.map((r) => ({
+    ...r,
+    attachments: r.attachments ? JSON.parse(r.attachments) : undefined,
+  }));
 }
 
 export function createTask(
