@@ -160,6 +160,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     'Processing messages',
   );
 
+  // Typing indicator: show while agent is working
+  if (channel.setTyping) channel.setTyping(chatJid, true).catch(() => {});
+
   // React with ⚡ on every pending message and set reply target
   const lastMsg = missedMessages[missedMessages.length - 1];
   if (channel.sendReaction) {
@@ -208,6 +211,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }, attachments);
 
   if (idleTimer) clearTimeout(idleTimer);
+  if (channel.setTyping) channel.setTyping(chatJid, false).catch(() => {});
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
