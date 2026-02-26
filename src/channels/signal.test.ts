@@ -1142,7 +1142,7 @@ describe('SignalChannel', () => {
         }),
       );
       // transcribeAudio must not be called when download fails
-      expect(vi.mocked(transcribeAudio).mock.calls.length).toBe(0);
+      expect(vi.mocked(transcribeAudio)).not.toHaveBeenCalled();
     });
   });
 
