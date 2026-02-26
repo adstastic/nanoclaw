@@ -11,6 +11,7 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'SIGNAL_API_URL',
   'SIGNAL_PHONE_NUMBER',
+  'WHISPER_API_URL',
 ]);
 
 export const ASSISTANT_NAME =
@@ -81,3 +82,6 @@ export const SIGNAL_API_URL =
 export const SIGNAL_PHONE_NUMBER =
   process.env.SIGNAL_PHONE_NUMBER || envConfig.SIGNAL_PHONE_NUMBER || '';
 
+// Whisper ASR for voice note transcription
+export const WHISPER_API_URL =
+  process.env.WHISPER_API_URL || envConfig.WHISPER_API_URL || 'http://localhost:2022';
