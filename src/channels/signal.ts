@@ -323,6 +323,8 @@ export class SignalChannel implements Channel {
           const ok = await this.downloadAttachment(att.id, filePath);
 
           if (isAudio) {
+            logger.info({ ok, filePath, attachmentId: att.id }, 'Audio attachment download result');
+            this.sendReaction(chatJid, '🎤', dataMessage.timestamp, sender).catch(() => {});
             const transcript = ok ? await transcribeAudio(filePath, WHISPER_API_URL) : null;
             let label: string;
             if (transcript === null) {

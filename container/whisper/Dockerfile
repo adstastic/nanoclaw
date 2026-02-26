@@ -3,6 +3,7 @@ FROM ubuntu:24.04 AS builder
 
 RUN apt-get update && apt-get install -y \
     build-essential cmake git libcurl4-openssl-dev \
+    libavformat-dev libavcodec-dev libavutil-dev libswresample-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp /whisper
@@ -16,7 +17,7 @@ RUN cmake -B build \
 # Stage 2: minimal runtime image
 FROM ubuntu:24.04
 
-RUN apt-get update && apt-get install -y libcurl4 libgomp1 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y libcurl4 libgomp1 ffmpeg && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /whisper/build/bin/whisper-server /usr/local/bin/whisper-server
 
@@ -27,4 +28,5 @@ CMD ["whisper-server", \
      "--model", "/models/ggml-large-v3-turbo.bin", \
      "--host", "0.0.0.0", \
      "--port", "2022", \
-     "--inference-path", "/v1/audio/transcriptions"]
+     "--inference-path", "/v1/audio/transcriptions", \
+     "--tmp-dir", "/tmp"]

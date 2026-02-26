@@ -1,15 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { transcribeAudio } from './transcription.js';
+import * as childProcess from 'node:child_process';
 import fs from 'node:fs';
 
 vi.mock('node:fs');
+vi.mock('node:child_process');
 
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
 describe('transcribeAudio', () => {
   beforeEach(() => {
-    vi.mocked(fs.readFileSync).mockReturnValue(Buffer.from('fake-audio'));
+    vi.mocked(childProcess.execSync).mockReturnValue(Buffer.from(''));
+    vi.mocked(fs.readFileSync).mockReturnValue(Buffer.from('fake-wav'));
+    vi.mocked(fs.copyFileSync).mockReturnValue(undefined);
+    vi.mocked(fs.unlink).mockImplementation((_path, cb) => cb?.(null));
     mockFetch.mockReset();
   });
 
@@ -41,5 +46,14 @@ describe('transcribeAudio', () => {
     mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
     const result = await transcribeAudio('/tmp/audio.ogg', 'http://localhost:2022');
     expect(result).toBeNull();
+  });
+
+  it('returns null when afconvert fails', async () => {
+    vi.mocked(childProcess.execSync).mockImplementationOnce(() => {
+      throw new Error('afconvert: command not found');
+    });
+    const result = await transcribeAudio('/tmp/audio.ogg', 'http://localhost:2022');
+    expect(result).toBeNull();
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
