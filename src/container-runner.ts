@@ -187,6 +187,8 @@ function buildVolumeMounts(
  * Per-group overrides: if groups/{folder}/.env exists, its values take
  * precedence over the global .env for the same keys. This allows scoping
  * tokens per group (e.g., a read-only GH_TOKEN for a monitoring agent).
+ *
+ * Only keys listed in `keys` can be overridden. Group .env files cannot introduce new env vars.
  */
 export function readSecrets(groupFolder: string): Record<string, string> {
   const keys = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'GH_TOKEN'];
@@ -195,23 +197,22 @@ export function readSecrets(groupFolder: string): Record<string, string> {
   let groupOverrides: Record<string, string> = {};
   try {
     const content = fs.readFileSync(groupEnvFile, 'utf-8');
-    // Reuse the same parsing logic — write a temp-free inline parse
+    const parsed: Record<string, string> = {};
     for (const line of content.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
       const eqIdx = trimmed.indexOf('=');
       if (eqIdx === -1) continue;
-      const key = trimmed.slice(0, eqIdx).trim();
-      if (!keys.includes(key)) continue;
-      let value = trimmed.slice(eqIdx + 1).trim();
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1);
+      const k = trimmed.slice(0, eqIdx).trim();
+      let v = trimmed.slice(eqIdx + 1).trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+        v = v.slice(1, -1);
       }
-      if (value) groupOverrides[key] = value;
+      if (v) parsed[k] = v;
     }
+    groupOverrides = Object.fromEntries(
+      Object.entries(parsed).filter(([k, v]) => keys.includes(k) && v),
+    ) as Record<string, string>;
   } catch {
     // No group .env — use global only
   }

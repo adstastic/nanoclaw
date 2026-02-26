@@ -11,8 +11,6 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'SIGNAL_API_URL',
   'SIGNAL_PHONE_NUMBER',
-  'TELEGRAM_BOT_TOKEN',
-  'TELEGRAM_ONLY',
 ]);
 
 export const ASSISTANT_NAME =
@@ -83,8 +81,3 @@ export const SIGNAL_API_URL =
 export const SIGNAL_PHONE_NUMBER =
   process.env.SIGNAL_PHONE_NUMBER || envConfig.SIGNAL_PHONE_NUMBER || '';
 
-// Telegram configuration
-export const TELEGRAM_BOT_TOKEN =
-  process.env.TELEGRAM_BOT_TOKEN || envConfig.TELEGRAM_BOT_TOKEN || '';
-export const TELEGRAM_ONLY =
-  (process.env.TELEGRAM_ONLY || envConfig.TELEGRAM_ONLY) === 'true';
