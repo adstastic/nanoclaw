@@ -31,3 +31,4 @@ groups/*/*
 
 agents-sdk-docs
 .worktrees/
+store/whisper-models/
