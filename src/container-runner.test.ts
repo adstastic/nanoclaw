@@ -218,20 +218,7 @@ describe('readSecrets per-group overrides', () => {
     vi.clearAllMocks();
   });
 
-  it('group .env overrides global GH_TOKEN', () => {
-    mockReadEnvFile.mockReturnValue({
-      GH_TOKEN: 'global-token-should-not-appear',
-      ANTHROPIC_API_KEY: 'global-api-key',
-    });
-    mockedFs.readFileSync.mockReturnValue('GH_TOKEN=scoped-feedback-token\n');
-
-    const secrets = readSecrets('feedback');
-
-    expect(secrets.GH_TOKEN).toBe('scoped-feedback-token');
-    expect(secrets.ANTHROPIC_API_KEY).toBe('global-api-key');
-  });
-
-  it('global GH_TOKEN is not passed when group overrides it', () => {
+  it('group .env value takes precedence over global for the same key', () => {
     mockReadEnvFile.mockReturnValue({
       GH_TOKEN: 'global-token-secret',
       ANTHROPIC_API_KEY: 'global-api-key',
@@ -240,8 +227,9 @@ describe('readSecrets per-group overrides', () => {
 
     const secrets = readSecrets('feedback');
 
-    expect(secrets.GH_TOKEN).not.toBe('global-token-secret');
     expect(secrets.GH_TOKEN).toBe('scoped-token');
+    expect(secrets.GH_TOKEN).not.toBe('global-token-secret');
+    expect(secrets.ANTHROPIC_API_KEY).toBe('global-api-key');
   });
 
   it('falls back to global secrets when no group .env exists', () => {

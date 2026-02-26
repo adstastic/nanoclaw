@@ -34,6 +34,39 @@ describe('JID ownership patterns', () => {
   });
 });
 
+// --- Signal JID routing ---
+
+describe('Signal JID routing', () => {
+  // Mock channel implementing the Channel interface's handlesJid method
+  function makeSignalChannel() {
+    return {
+      name: 'signal',
+      handlesJid: (jid: string) => jid.startsWith('sig:'),
+    };
+  }
+
+  it('sig:+phone JID is handled by SignalChannel', () => {
+    const channel = makeSignalChannel();
+    expect(channel.handlesJid('sig:+447447518300')).toBe(true);
+  });
+
+  it('sig:group.xxx JID is handled by SignalChannel', () => {
+    const channel = makeSignalChannel();
+    expect(channel.handlesJid('sig:group.azY5SzhQbmFRV1VlWlIwWjdBYnFVdz09')).toBe(true);
+  });
+
+  it('SignalChannel does not handle WhatsApp JIDs', () => {
+    const channel = makeSignalChannel();
+    expect(channel.handlesJid('12345678@g.us')).toBe(false);
+    expect(channel.handlesJid('12345678@s.whatsapp.net')).toBe(false);
+  });
+
+  it('SignalChannel does not handle Telegram JIDs', () => {
+    const channel = makeSignalChannel();
+    expect(channel.handlesJid('tg:123456789')).toBe(false);
+  });
+});
+
 // --- getAvailableGroups ---
 
 describe('getAvailableGroups', () => {

@@ -321,6 +321,8 @@ export function getNewMessages(
     ORDER BY timestamp
   `;
 
+  // SQLite returns `attachments` as a raw JSON string or null; this type replaces
+  // the typed Attachment[] field with the raw DB representation before deserialization.
   const rows = db
     .prepare(sql)
     .all(lastTimestamp, ...jids, `${botPrefix}:%`) as Array<Omit<NewMessage, 'attachments'> & { attachments: string | null }>;
