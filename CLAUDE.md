@@ -18,7 +18,6 @@ Single Node.js process that connects to Signal, routes messages to Claude Agent 
 | `src/container-runner.ts` | Spawns containers with mounts |
 | `src/container-runtime.ts` | Container runtime abstraction (Apple Container) |
 | `src/mount-security.ts` | Validates additional mounts against allowlist |
-| `src/api.ts` | HTTP API for programmatic access (wearable, scripts) |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations (store/messages.db) |
 | `groups/{name}/CLAUDE.md` | Per-group agent instructions (versioned in git) |
