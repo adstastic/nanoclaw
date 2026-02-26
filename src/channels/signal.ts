@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 
-import { ASSISTANT_NAME, STORE_DIR, TRIGGER_PATTERN } from '../config.js';
+import { ASSISTANT_NAME, STORE_DIR, TRIGGER_PATTERN, WHISPER_API_URL } from '../config.js';
+import { transcribeAudio } from '../transcription.js';
 import { logger } from '../logger.js';
 import {
   Attachment,
@@ -23,6 +24,12 @@ function extFromContentType(ct: string): string {
     'text/plain': 'txt',
     'text/csv': 'csv',
     'text/markdown': 'md',
+    'audio/ogg': 'ogg',
+    'audio/mp4': 'mp4',
+    'audio/mpeg': 'mp3',
+    'audio/aac': 'aac',
+    'audio/wav': 'wav',
+    'audio/webm': 'webm',
   };
   return map[ct] || 'bin';
 }
@@ -297,10 +304,12 @@ export class SignalChannel implements Channel {
         }
       } else if (att.id) {
         const ctBase = ct.split('/')[0];
+        const isAudio = ctBase === 'audio';
         const isSupported =
           ctBase === 'image' ||
           ct === 'application/pdf' ||
-          ctBase === 'text';
+          ctBase === 'text' ||
+          isAudio;
 
         if (!isSupported) {
           logger.warn({ attachmentId: att.id, contentType: ct }, 'Skipping unsupported attachment type');
@@ -312,11 +321,26 @@ export class SignalChannel implements Channel {
           const filePath = path.join(attachDir, `${i}.${ext}`);
 
           const ok = await this.downloadAttachment(att.id, filePath);
-          if (ok) {
-            downloadedAttachments.push({ hostPath: filePath, contentType: ct, filename: displayName });
+
+          if (isAudio) {
+            const transcript = ok ? await transcribeAudio(filePath, WHISPER_API_URL) : null;
+            let label: string;
+            if (transcript === null) {
+              label = '[Voice: transcription unavailable]';
+            } else if (transcript === '') {
+              label = '[Voice: (no speech detected)]';
+            } else {
+              label = `[Voice: "${transcript}"]`;
+            }
+            content = content ? `${content} ${label}` : label;
+            // Don't push to downloadedAttachments — agent needs only the transcript
+          } else {
+            if (ok) {
+              downloadedAttachments.push({ hostPath: filePath, contentType: ct, filename: displayName });
+            }
+            const label = isImage ? `[Image: ${displayName}]` : `[File: ${displayName}]`;
+            content = content ? `${content} ${label}` : label;
           }
-          const label = isImage ? `[Image: ${displayName}]` : `[File: ${displayName}]`;
-          content = content ? `${content} ${label}` : label;
         }
       } else {
         // No id — can't download, show a type-appropriate placeholder

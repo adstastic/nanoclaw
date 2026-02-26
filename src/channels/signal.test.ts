@@ -6,6 +6,11 @@ vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
   TRIGGER_PATTERN: /^@Andy\b/i,
   STORE_DIR: '/tmp/test-store',
+  WHISPER_API_URL: 'http://localhost:2022',
+}));
+
+vi.mock('../transcription.js', () => ({
+  transcribeAudio: vi.fn(),
 }));
 
 vi.mock('../logger.js', () => ({
@@ -106,6 +111,7 @@ afterEach(() => {
 
 import fs from 'fs';
 import { SignalChannel, SignalChannelOpts } from './signal.js';
+import { transcribeAudio } from '../transcription.js';
 
 // --- Test helpers ---
 
@@ -1004,6 +1010,139 @@ describe('SignalChannel', () => {
           attachments: undefined,
         }),
       );
+    });
+  });
+
+  // --- Audio attachment handling ---
+
+  describe('audio attachment handling', () => {
+    beforeEach(() => {
+      vi.mocked(fs.mkdirSync).mockClear();
+      vi.mocked(fs.writeFileSync).mockClear();
+    });
+
+    it('injects transcript into message content', async () => {
+      vi.mocked(transcribeAudio).mockResolvedValueOnce('call me back please');
+      const audioBytes = Buffer.from('OGG_FAKE_DATA');
+
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      // Mock attachment download fetch
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        arrayBuffer: async () => audioBytes.buffer,
+      });
+
+      const ts = 1704067200000;
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          timestamp: ts,
+          message: '',
+          attachments: [{ contentType: 'audio/ogg', id: 'audio-123' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: '[Voice: "call me back please"]',
+          attachments: undefined,
+        }),
+      );
+    });
+
+    it('uses unavailable fallback when transcription returns null', async () => {
+      vi.mocked(transcribeAudio).mockResolvedValueOnce(null);
+      const audioBytes = Buffer.from('OGG_FAKE_DATA');
+
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        arrayBuffer: async () => audioBytes.buffer,
+      });
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: '',
+          attachments: [{ contentType: 'audio/ogg', id: 'audio-123' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: '[Voice: transcription unavailable]',
+          attachments: undefined,
+        }),
+      );
+    });
+
+    it('uses no-speech fallback when transcript is empty string', async () => {
+      vi.mocked(transcribeAudio).mockResolvedValueOnce('');
+      const audioBytes = Buffer.from('OGG_FAKE_DATA');
+
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        arrayBuffer: async () => audioBytes.buffer,
+      });
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: '',
+          attachments: [{ contentType: 'audio/ogg', id: 'audio-123' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: '[Voice: (no speech detected)]',
+          attachments: undefined,
+        }),
+      );
+    });
+
+    it('uses unavailable fallback when audio download fails', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      // Make the download API call return a non-ok response
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: '',
+          attachments: [{ contentType: 'audio/ogg', id: 'audio-fail' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: '[Voice: transcription unavailable]',
+          attachments: undefined,
+        }),
+      );
+      // transcribeAudio must not be called when download fails
+      expect(vi.mocked(transcribeAudio)).not.toHaveBeenCalled();
     });
   });
 
