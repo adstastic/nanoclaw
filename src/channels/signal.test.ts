@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
   TRIGGER_PATTERN: /^@Andy\b/i,
+  STORE_DIR: '/tmp/test-store',
 }));
 
 vi.mock('../logger.js', () => ({
@@ -15,6 +16,22 @@ vi.mock('../logger.js', () => ({
     error: vi.fn(),
   },
 }));
+
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      mkdirSync: vi.fn(),
+      writeFileSync: vi.fn(),
+      readFileSync: actual.readFileSync,
+    },
+    mkdirSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    readFileSync: actual.readFileSync,
+  };
+});
 
 // --- WebSocket mock ---
 
@@ -87,6 +104,7 @@ afterEach(() => {
   (globalThis as any).fetch = originalFetch;
 });
 
+import fs from 'fs';
 import { SignalChannel, SignalChannelOpts } from './signal.js';
 
 // --- Test helpers ---
@@ -753,6 +771,72 @@ describe('SignalChannel', () => {
       );
     });
 
+    it('reassembles long messages from text/x-signal-plain attachment', async () => {
+      const fullText = 'A'.repeat(3000); // Longer than Signal's ~2000 char body limit
+      const truncatedBody = fullText.slice(0, 2000);
+
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      // Mock fetch for the long-message attachment download (after connect)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        text: async () => fullText,
+      });
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: truncatedBody,
+          attachments: [{ contentType: 'text/x-signal-plain', id: 'long-msg-123' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({ content: fullText }),
+      );
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:8080/v1/attachments/long-msg-123',
+      );
+    });
+
+    it('falls back to truncated body with note when long-message download fails', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel(
+        'http://localhost:8080',
+        '+15551234567',
+        opts,
+      );
+      const ws = await connectChannel(channel);
+
+      // Mock fetch failure for the attachment download (after connect)
+      mockFetch.mockRejectedValueOnce(new Error('Network error'));
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: 'Truncated body',
+          attachments: [{ contentType: 'text/x-signal-plain', id: 'fail-123' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      // Should prepend note and deliver truncated body
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: '[Note: long message — full text unavailable, showing partial content]\nTruncated body',
+        }),
+      );
+    });
+
     it('ignores messages with no text and no attachments', async () => {
       const opts = createTestOpts();
       const channel = new SignalChannel(
@@ -771,6 +855,155 @@ describe('SignalChannel', () => {
 
       expect(opts.onMessage).not.toHaveBeenCalled();
       expect(opts.onChatMetadata).not.toHaveBeenCalled();
+    });
+
+    it('shows [Attachment] placeholder for pdf without id (no download attempted)', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: 'See attached',
+          attachments: [{ contentType: 'application/pdf' }], // no id
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({ content: 'See attached [Attachment]' }),
+      );
+    });
+  });
+
+  // --- Non-image attachment download ---
+
+  describe('non-image attachment download', () => {
+    beforeEach(() => {
+      vi.mocked(fs.mkdirSync).mockClear();
+      vi.mocked(fs.writeFileSync).mockClear();
+    });
+
+    it('downloads a PDF attachment and includes it in message attachments', async () => {
+      const pdfBytes = Buffer.from('%PDF-1.4 fake content');
+
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      // Set up attachment fetch mock AFTER connectChannel (which consumed the /v1/about mock)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        arrayBuffer: async () => pdfBytes.buffer,
+      });
+
+      const ts = 1704067200000;
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          timestamp: ts,
+          message: 'Check this out',
+          attachments: [{ contentType: 'application/pdf', id: 'pdf-123', filename: 'report.pdf' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      // Fetch called for the attachment
+      expect(mockFetch).toHaveBeenCalledWith('http://localhost:8080/v1/attachments/pdf-123');
+
+      // File written to correct path (index-based, not att.filename)
+      const msgId = `${ts}-+15559990000`;
+      expect(vi.mocked(fs.writeFileSync)).toHaveBeenCalledWith(
+        expect.stringContaining(`attachments/${msgId}/0.pdf`),
+        expect.any(Buffer),
+      );
+
+      // onMessage called with attachment metadata and display hint in content
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: expect.stringContaining('[File: report.pdf]'),
+          attachments: expect.arrayContaining([
+            expect.objectContaining({ contentType: 'application/pdf' }),
+          ]),
+        }),
+      );
+    });
+
+    it('skips unsupported attachment types (e.g. application/zip) without downloading', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: 'Check this out',
+          attachments: [{ contentType: 'application/zip', id: 'zip-456', filename: 'archive.zip' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      // No file download attempted for unsupported type
+      expect(vi.mocked(fs.writeFileSync)).not.toHaveBeenCalled();
+
+      // Message delivered with original text, no attachment label
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: 'Check this out',
+          attachments: undefined,
+        }),
+      );
+    });
+
+    it('shows [Attachment] placeholder when no id (no download)', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: 'Hi',
+          attachments: [{ contentType: 'application/pdf' }], // no id
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({ content: 'Hi [Attachment]' }),
+      );
+      expect(vi.mocked(fs.writeFileSync)).not.toHaveBeenCalled();
+    });
+
+    it('gracefully delivers message when attachment download fails', async () => {
+      const opts = createTestOpts();
+      const channel = new SignalChannel('http://localhost:8080', '+15551234567', opts);
+      const ws = await connectChannel(channel);
+
+      mockFetch.mockRejectedValueOnce(new Error('Network error'));
+
+      ws._emitMessage(
+        makeEnvelope({
+          source: '+15559990000',
+          message: 'See attached',
+          attachments: [{ contentType: 'application/pdf', id: 'fail-pdf' }],
+        }),
+      );
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalled());
+
+      // Message still delivered, no attachment in the array
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'sig:+15559990000',
+        expect.objectContaining({
+          content: expect.stringContaining('See attached'),
+          attachments: undefined,
+        }),
+      );
     });
   });
 
@@ -883,141 +1116,56 @@ describe('SignalChannel', () => {
 
       await expect(
         channel.sendMessage('sig:+15559990000', 'Will fail'),
-      ).resolves.toBeUndefined();
+      ).rejects.toThrow('Network error');
     });
   });
 
-  // --- setTyping ---
+  // --- handlesJid ---
 
-  describe('setTyping', () => {
-    it('sends PUT for typing start on DM', async () => {
-      const opts = createTestOpts();
-      const channel = new SignalChannel(
-        'http://localhost:8080',
-        '+15551234567',
-        opts,
-      );
-      await connectChannel(channel);
-
-      mockFetch.mockResolvedValueOnce({ ok: true });
-      await channel.setTyping('sig:+15559990000', true);
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        'http://localhost:8080/v1/typing-indicator/+15551234567',
-        expect.objectContaining({ method: 'PUT' }),
-      );
-
-      const typingCall = mockFetch.mock.calls.find(
-        (c: any) =>
-          typeof c[0] === 'string' && c[0].includes('typing-indicator'),
-      ) as any;
-      const body = JSON.parse(typingCall[1].body);
-      expect(body.recipient).toBe('+15559990000');
-    });
-
-    it('sends DELETE for typing stop', async () => {
-      const opts = createTestOpts();
-      const channel = new SignalChannel(
-        'http://localhost:8080',
-        '+15551234567',
-        opts,
-      );
-      await connectChannel(channel);
-
-      mockFetch.mockResolvedValueOnce({ ok: true });
-      await channel.setTyping('sig:+15559990000', false);
-
-      const typingCall = mockFetch.mock.calls.find(
-        (c: any) =>
-          typeof c[0] === 'string' && c[0].includes('typing-indicator'),
-      ) as any;
-      expect(typingCall[1].method).toBe('DELETE');
-    });
-
-    it('sends group typing indicator with group field', async () => {
-      const opts = createTestOpts();
-      const channel = new SignalChannel(
-        'http://localhost:8080',
-        '+15551234567',
-        opts,
-      );
-      await connectChannel(channel);
-
-      mockFetch.mockResolvedValueOnce({ ok: true });
-      await channel.setTyping('sig:group.Z3JvdXBBQkMxMjM=', true);
-
-      const typingCall = mockFetch.mock.calls.find(
-        (c: any) =>
-          typeof c[0] === 'string' && c[0].includes('typing-indicator'),
-      ) as any;
-      const body = JSON.parse(typingCall[1].body);
-      expect(body.group).toBe('groupABC123');
-      expect(body.recipient).toBeUndefined();
-    });
-
-    it('handles typing indicator failure gracefully', async () => {
-      const opts = createTestOpts();
-      const channel = new SignalChannel(
-        'http://localhost:8080',
-        '+15551234567',
-        opts,
-      );
-      await connectChannel(channel);
-
-      mockFetch.mockRejectedValueOnce(new Error('Rate limited'));
-
-      await expect(
-        channel.setTyping('sig:+15559990000', true),
-      ).resolves.toBeUndefined();
-    });
-  });
-
-  // --- ownsJid ---
-
-  describe('ownsJid', () => {
-    it('owns sig: JIDs', () => {
+  describe('handlesJid', () => {
+    it('handles sig: JIDs', () => {
       const channel = new SignalChannel(
         'http://localhost:8080',
         '+15551234567',
         createTestOpts(),
       );
-      expect(channel.ownsJid('sig:+15559990000')).toBe(true);
+      expect(channel.handlesJid('sig:+15559990000')).toBe(true);
     });
 
-    it('owns sig: group JIDs', () => {
+    it('handles sig: group JIDs', () => {
       const channel = new SignalChannel(
         'http://localhost:8080',
         '+15551234567',
         createTestOpts(),
       );
-      expect(channel.ownsJid('sig:group.Z3JvdXBBQkMxMjM=')).toBe(true);
+      expect(channel.handlesJid('sig:group.Z3JvdXBBQkMxMjM=')).toBe(true);
     });
 
-    it('does not own tg: JIDs', () => {
+    it('does not handle tg: JIDs', () => {
       const channel = new SignalChannel(
         'http://localhost:8080',
         '+15551234567',
         createTestOpts(),
       );
-      expect(channel.ownsJid('tg:123456')).toBe(false);
+      expect(channel.handlesJid('tg:123456')).toBe(false);
     });
 
-    it('does not own WhatsApp JIDs', () => {
+    it('does not handle WhatsApp JIDs', () => {
       const channel = new SignalChannel(
         'http://localhost:8080',
         '+15551234567',
         createTestOpts(),
       );
-      expect(channel.ownsJid('12345@g.us')).toBe(false);
+      expect(channel.handlesJid('12345@g.us')).toBe(false);
     });
 
-    it('does not own unknown JID formats', () => {
+    it('does not handle unknown JID formats', () => {
       const channel = new SignalChannel(
         'http://localhost:8080',
         '+15551234567',
         createTestOpts(),
       );
-      expect(channel.ownsJid('random-string')).toBe(false);
+      expect(channel.handlesJid('random-string')).toBe(false);
     });
   });
 

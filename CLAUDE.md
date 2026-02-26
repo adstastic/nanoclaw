@@ -4,21 +4,19 @@ Personal Claude assistant. See [README.md](README.md) for philosophy and setup. 
 
 ## Quick Context
 
-Single Node.js process that connects to WhatsApp/Signal/Telegram, routes messages to Claude Agent SDK running in Docker containers. Each group has isolated filesystem and memory. One container per group at a time, managed by `GroupQueue`.
+Single Node.js process that connects to Signal, routes messages to Claude Agent SDK running in Apple Containers. Each group has isolated filesystem and memory. One container per group at a time, managed by `GroupQueue`.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `src/index.ts` | Orchestrator: state, message loop, agent invocation |
-| `src/channels/whatsapp.ts` | WhatsApp connection via Baileys |
 | `src/channels/signal.ts` | Signal via signal-cli-rest-api WebSocket/REST |
-| `src/channels/telegram.ts` | Telegram via grammY |
 | `src/ipc.ts` | IPC watcher: messages, reactions, tasks, group registration |
 | `src/router.ts` | Message formatting (XML) and outbound routing |
 | `src/config.ts` | Trigger pattern, paths, intervals |
-| `src/container-runner.ts` | Spawns Docker containers with mounts |
-| `src/container-runtime.ts` | Docker/container runtime abstraction |
+| `src/container-runner.ts` | Spawns containers with mounts |
+| `src/container-runtime.ts` | Container runtime abstraction (Apple Container) |
 | `src/mount-security.ts` | Validates additional mounts against allowlist |
 | `src/api.ts` | HTTP API for programmatic access (wearable, scripts) |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
@@ -36,6 +34,7 @@ Single Node.js process that connects to WhatsApp/Signal/Telegram, routes message
 | `/setup` | First-time installation, authentication, service configuration |
 | `/customize` | Adding channels, integrations, changing behavior |
 | `/debug` | Container issues, logs, troubleshooting |
+| `/update` | Pull upstream NanoClaw changes, merge with customizations, run migrations |
 
 ## Architecture
 
@@ -60,7 +59,7 @@ Single Node.js process that connects to WhatsApp/Signal/Telegram, routes message
 - **Telegram**: grammY bot library, `tg:` JID prefix
 - **HTTP API**: `src/api.ts`, injects messages into a group's JID for programmatic access (e.g. iOS wearable). Requires `API_KEY` in `.env`. Responses route back to the API caller, not the messaging channel.
 
-### Signal-Specific Features
+### Signal Channel
 - ⚡ reaction on triggering message when bot starts processing
 - Quote-reply: bot's response quotes the triggering message via `setReplyTarget()`
 - `@mention` and reply-to-bot satisfy trigger (no `@g` prefix needed)
@@ -86,22 +85,16 @@ npm test             # Run vitest
 
 ### Running the Service
 
-Currently run manually (no launchd plist configured yet):
+Managed via LaunchAgent (`~/Library/LaunchAgents/com.nanoclaw.agent.plist`):
 ```bash
-# Start
-npm run build && node dist/index.js >> /tmp/nanoclaw.log 2>&1 &
-
-# Stop
-pkill -f 'node dist/index'
-
-# Restart (kill, rebuild, start)
-pkill -f 'node dist/index'; sleep 2; npm run build && node dist/index.js >> /tmp/nanoclaw.log 2>&1 &
+# Restart (rebuild + restart service)
+npm run build && launchctl kickstart -k gui/$(id -u)/com.nanoclaw.agent
 
 # Check logs
 tail -f /tmp/nanoclaw.log
 
 # Kill stale containers
-docker ps -a --filter "name=nanoclaw" --format "{{.Names}}" | xargs -r docker rm -f
+container ls --format json | jq -r '.[] | select(.name | startswith("nanoclaw")) | .name' | xargs -I{} container stop {}
 ```
 
 ### After Code Changes
@@ -122,5 +115,5 @@ The container buildkit caches the build context aggressively. `--no-cache` alone
 
 ## Known Issues
 
-- **send_reaction MCP tool not discoverable**: The `send_reaction` tool exists in the container's MCP server but the agent can't see it. Needs investigation — may be SDK tool discovery issue or allowedTools wildcard problem.
+- **send_reaction requires explicit CLAUDE.md mention**: `send_reaction` works, but the agent only discovers it when it is explicitly mentioned in the group's CLAUDE.md. Add a note about the tool in the relevant group's CLAUDE.md to enable it.
 - **Duplicate processes**: If multiple NanoClaw processes run simultaneously, Signal WebSocket messages get split between them (only one consumer gets each message). Always ensure single instance.

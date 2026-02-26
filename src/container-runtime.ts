@@ -2,7 +2,7 @@
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 
 import { logger } from './logger.js';
 
@@ -14,9 +14,9 @@ export function readonlyMountArgs(hostPath: string, containerPath: string): stri
   return ['--mount', `type=bind,source=${hostPath},target=${containerPath},readonly`];
 }
 
-/** Returns the shell command to stop a container by name. */
-export function stopContainer(name: string): string {
-  return `${CONTAINER_RUNTIME_BIN} stop ${name}`;
+/** Returns args for stopping a container by name (use with execFileSync/execFile). */
+export function stopContainerArgs(name: string): string[] {
+  return [CONTAINER_RUNTIME_BIN, 'stop', name];
 }
 
 /** Ensure the container runtime is running, retrying with backoff on startup. */
@@ -64,7 +64,8 @@ export function cleanupOrphans(): void {
       .map((c) => c.configuration.id);
     for (const name of orphans) {
       try {
-        execSync(stopContainer(name), { stdio: 'pipe' });
+        const [bin, ...args] = stopContainerArgs(name);
+        execFileSync(bin, args, { stdio: 'pipe' });
       } catch { /* already stopped */ }
     }
     if (orphans.length > 0) {

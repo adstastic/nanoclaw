@@ -14,6 +14,8 @@ vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
+  STORE_DIR: '/tmp/nanoclaw-test-store',
+  TIMEZONE: 'America/Los_Angeles',
 }));
 
 // Mock logger
@@ -88,8 +90,8 @@ vi.mock('child_process', async () => {
 });
 
 import fs from 'fs';
-import { runContainerAgent, readSecrets, ContainerOutput } from './container-runner.js';
-import type { RegisteredGroup } from './types.js';
+import { runContainerAgent, readSecrets, prepareAttachmentsForContainer, ContainerOutput } from './container-runner.js';
+import type { RegisteredGroup, NewMessage } from './types.js';
 
 const mockedFs = vi.mocked(fs);
 
@@ -216,20 +218,7 @@ describe('readSecrets per-group overrides', () => {
     vi.clearAllMocks();
   });
 
-  it('group .env overrides global GH_TOKEN', () => {
-    mockReadEnvFile.mockReturnValue({
-      GH_TOKEN: 'global-token-should-not-appear',
-      ANTHROPIC_API_KEY: 'global-api-key',
-    });
-    mockedFs.readFileSync.mockReturnValue('GH_TOKEN=scoped-feedback-token\n');
-
-    const secrets = readSecrets('feedback');
-
-    expect(secrets.GH_TOKEN).toBe('scoped-feedback-token');
-    expect(secrets.ANTHROPIC_API_KEY).toBe('global-api-key');
-  });
-
-  it('global GH_TOKEN is not passed when group overrides it', () => {
+  it('group .env value takes precedence over global for the same key', () => {
     mockReadEnvFile.mockReturnValue({
       GH_TOKEN: 'global-token-secret',
       ANTHROPIC_API_KEY: 'global-api-key',
@@ -238,8 +227,9 @@ describe('readSecrets per-group overrides', () => {
 
     const secrets = readSecrets('feedback');
 
-    expect(secrets.GH_TOKEN).not.toBe('global-token-secret');
     expect(secrets.GH_TOKEN).toBe('scoped-token');
+    expect(secrets.GH_TOKEN).not.toBe('global-token-secret');
+    expect(secrets.ANTHROPIC_API_KEY).toBe('global-api-key');
   });
 
   it('falls back to global secrets when no group .env exists', () => {
@@ -280,5 +270,71 @@ describe('readSecrets per-group overrides', () => {
 
     expect(secrets.GH_TOKEN).toBe('scoped');
     expect(secrets).not.toHaveProperty('RANDOM_SECRET');
+  });
+});
+
+describe('prepareAttachmentsForContainer', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedFs.mkdirSync.mockReturnValue(undefined as any);
+    mockedFs.copyFileSync.mockReturnValue(undefined);
+  });
+
+  it('copies attachment to IPC dir and returns container path with original content type', () => {
+    const messages: NewMessage[] = [{
+      id: 'msg-001',
+      chat_jid: 'sig:+1234',
+      sender: '+1234',
+      sender_name: 'Alice',
+      content: 'here [Image: photo.jpg]',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: false,
+      attachments: [{ hostPath: '/store/attachments/msg-001/0.jpg', contentType: 'image/jpeg', filename: 'photo.jpg' }],
+    }];
+
+    const result = prepareAttachmentsForContainer(messages, 'main');
+
+    expect(result).toEqual([{
+      containerPath: '/workspace/ipc/attachments/msg-001/photo.jpg',
+      contentType: 'image/jpeg',
+    }]);
+    expect(mockedFs.copyFileSync).toHaveBeenCalledWith(
+      '/store/attachments/msg-001/0.jpg',
+      expect.stringContaining('msg-001/photo.jpg'),
+    );
+  });
+
+  it('uses hostPath basename as filename when filename not set', () => {
+    const messages: NewMessage[] = [{
+      id: 'msg-002',
+      chat_jid: 'sig:+1234',
+      sender: '+1234',
+      sender_name: 'Alice',
+      content: 'doc',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: false,
+      attachments: [{ hostPath: '/store/attachments/msg-002/0.pdf', contentType: 'application/pdf' }],
+    }];
+
+    const result = prepareAttachmentsForContainer(messages, 'main');
+
+    expect(result[0].containerPath).toBe('/workspace/ipc/attachments/msg-002/0.pdf');
+    expect(result[0].contentType).toBe('application/pdf');
+  });
+
+  it('skips messages with no attachments', () => {
+    const messages: NewMessage[] = [{
+      id: 'msg-003',
+      chat_jid: 'sig:+1234',
+      sender: '+1234',
+      sender_name: 'Alice',
+      content: 'just text',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: false,
+    }];
+
+    const result = prepareAttachmentsForContainer(messages, 'main');
+    expect(result).toEqual([]);
+    expect(mockedFs.copyFileSync).not.toHaveBeenCalled();
   });
 });

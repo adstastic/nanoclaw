@@ -9,13 +9,8 @@ import {
   POLL_INTERVAL,
   SIGNAL_API_URL,
   SIGNAL_PHONE_NUMBER,
-  TELEGRAM_BOT_TOKEN,
-  TELEGRAM_ONLY,
-  TRIGGER_PATTERN,
   groupTriggerPattern,
 } from './config.js';
-import { WhatsAppChannel } from './channels/whatsapp.js';
-import { TelegramChannel } from './channels/telegram.js';
 import { SignalChannel } from './channels/signal.js';
 import {
   ContainerOutput,
@@ -41,7 +36,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import { findChannel, formatMessages, formatOutbound, parseSignalMessageId } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { cleanupOrphans, ensureContainerRuntimeRunning } from './container-runtime.js';
@@ -57,7 +52,6 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-let whatsapp: WhatsAppChannel;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
@@ -153,8 +147,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const prompt = formatMessages(missedMessages);
 
   // Prepare image attachments for container (copies files to IPC dir)
-  const messageIds = missedMessages.map(m => m.id);
-  const attachments = prepareAttachmentsForContainer(messageIds, group.folder);
+  const attachments = prepareAttachmentsForContainer(missedMessages, group.folder);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -168,21 +161,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     'Processing messages',
   );
 
-  // For Signal: react with ⚡ on every pending message and set reply target
+  // React with ⚡ on every pending message and set reply target
   const lastMsg = missedMessages[missedMessages.length - 1];
-  if (chatJid.startsWith('sig:') && 'sendReaction' in channel) {
+  if (channel.sendReaction) {
     for (const msg of missedMessages) {
-      const dashIdx = msg.id.indexOf('-');
-      if (dashIdx > 0) {
-        const targetTimestamp = parseInt(msg.id.slice(0, dashIdx), 10);
-        const targetAuthor = msg.id.slice(dashIdx + 1);
-        (channel as any).sendReaction(chatJid, '⚡', targetTimestamp, targetAuthor).catch(() => {});
+      const parsed = parseSignalMessageId(msg.id);
+      if (parsed) {
+        channel.sendReaction(chatJid, '⚡', parsed.timestamp, parsed.author).catch(() => {});
       }
     }
-    // Set reply target so the first response quotes the triggering message
-    if ('setReplyTarget' in channel) {
-      (channel as any).setReplyTarget(chatJid, lastMsg.id);
-    }
+  }
+  if (channel.setReplyTarget) {
+    channel.setReplyTarget(chatJid, lastMsg.id);
   }
 
   // Track idle timer for closing stdin when agent is idle
@@ -196,7 +186,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -225,7 +214,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }, attachments);
 
-  await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -239,6 +227,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
     logger.warn({ group: group.name }, 'Agent error, rolled back message cursor for retry');
+    // Notify user so they know something went wrong
+    channel.sendMessage(chatJid, "[System] Error processing your message. Will retry.").catch(() => {});
     return false;
   }
 
@@ -301,6 +291,7 @@ async function runAgent(
         chatJid,
         isMain,
         attachments: attachments?.length ? attachments : undefined,
+        assistantName: ASSISTANT_NAME,
       },
       (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
@@ -391,8 +382,7 @@ async function startMessageLoop(): Promise<void> {
           const formatted = formatMessages(messagesToSend);
 
           // Prepare attachments for piped messages
-          const pipeMessageIds = messagesToSend.map(m => m.id);
-          const pipeAttachments = prepareAttachmentsForContainer(pipeMessageIds, group.folder);
+          const pipeAttachments = prepareAttachmentsForContainer(messagesToSend, group.folder);
 
           if (queue.sendMessage(chatJid, formatted, pipeAttachments.length > 0 ? pipeAttachments : undefined)) {
             logger.debug(
@@ -403,19 +393,15 @@ async function startMessageLoop(): Promise<void> {
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
 
-            // Signal: react ⚡ on piped messages too
+            // React ⚡ on piped messages too
             const pipedLastMsg = messagesToSend[messagesToSend.length - 1];
-            if (chatJid.startsWith('sig:') && 'sendReaction' in channel) {
-              const dashIdx = pipedLastMsg.id.indexOf('-');
-              if (dashIdx > 0) {
-                const ts = parseInt(pipedLastMsg.id.slice(0, dashIdx), 10);
-                const author = pipedLastMsg.id.slice(dashIdx + 1);
-                (channel as any).sendReaction(chatJid, '⚡', ts, author).catch(() => {});
+            if (channel.sendReaction) {
+              const parsed = parseSignalMessageId(pipedLastMsg.id);
+              if (parsed) {
+                channel.sendReaction(chatJid, '⚡', parsed.timestamp, parsed.author).catch(() => {});
               }
             }
 
-            // Show typing indicator while the container processes the piped message
-            channel.setTyping?.(chatJid, true);
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
@@ -448,7 +434,48 @@ function recoverPendingMessages(): void {
 }
 
 
+const PID_FILE = '/tmp/nanoclaw.pid';
+
+function writePidFile(): void {
+  fs.writeFileSync(PID_FILE, String(process.pid));
+}
+
+function removePidFile(): void {
+  try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
+}
+
+function checkPidFile(): void {
+  let existingPid: number | null = null;
+  try {
+    const content = fs.readFileSync(PID_FILE, 'utf-8').trim();
+    existingPid = parseInt(content, 10);
+  } catch {
+    // No PID file — first run
+    return;
+  }
+
+  if (!existingPid || isNaN(existingPid)) return;
+
+  try {
+    process.kill(existingPid, 0);
+    // If we get here, the process is still running
+    logger.error(
+      { pid: existingPid },
+      `Another NanoClaw process is already running (PID ${existingPid}). Exiting.`,
+    );
+    process.exit(1);
+  } catch {
+    // Process not running — stale PID file, safe to proceed
+    logger.warn({ pid: existingPid }, 'Stale PID file found, proceeding');
+  }
+}
+
 async function main(): Promise<void> {
+  checkPidFile();
+  writePidFile();
+  // Clean up PID file on any exit, including uncaught exceptions
+  process.on('exit', removePidFile);
+
   await ensureContainerRuntimeRunning();
   cleanupOrphans();
   initDatabase();
@@ -458,6 +485,7 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    removePidFile();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
@@ -474,18 +502,6 @@ async function main(): Promise<void> {
   };
 
   // Create and connect channels
-  if (!TELEGRAM_ONLY) {
-    whatsapp = new WhatsAppChannel(channelOpts);
-    channels.push(whatsapp);
-    await whatsapp.connect();
-  }
-
-  if (TELEGRAM_BOT_TOKEN) {
-    const telegram = new TelegramChannel(TELEGRAM_BOT_TOKEN, channelOpts);
-    channels.push(telegram);
-    await telegram.connect();
-  }
-
   if (SIGNAL_PHONE_NUMBER) {
     const signal = new SignalChannel(SIGNAL_API_URL, SIGNAL_PHONE_NUMBER, channelOpts);
     channels.push(signal);
@@ -520,8 +536,8 @@ async function main(): Promise<void> {
     sendReaction: (jid, emoji, targetTimestamp, targetAuthor) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      if ('sendReaction' in channel && typeof (channel as any).sendReaction === 'function') {
-        return (channel as any).sendReaction(jid, emoji, targetTimestamp, targetAuthor);
+      if (channel.sendReaction) {
+        return channel.sendReaction(jid, emoji, targetTimestamp, targetAuthor);
       }
       return Promise.resolve(); // Channel doesn't support reactions
     },
@@ -533,7 +549,7 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
+    syncGroupMetadata: () => Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
   });

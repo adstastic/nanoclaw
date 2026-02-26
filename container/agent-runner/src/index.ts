@@ -18,13 +18,18 @@ import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { detectImageContentType } from './content-type.js';
 
 type TextContentBlock = { type: 'text'; text: string };
 type ImageContentBlock = {
   type: 'image';
   source: { type: 'base64'; media_type: string; data: string };
 };
-type ContentBlock = TextContentBlock | ImageContentBlock;
+type DocumentContentBlock = {
+  type: 'document';
+  source: { type: 'base64'; media_type: string; data: string };
+};
+type ContentBlock = TextContentBlock | ImageContentBlock | DocumentContentBlock;
 
 interface ContainerInput {
   prompt: string;
@@ -33,6 +38,7 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  assistantName?: string;
   secrets?: Record<string, string>;
   attachments?: { containerPath: string; contentType: string }[];
 }
@@ -150,7 +156,7 @@ function getSessionSummary(sessionId: string, transcriptPath: string): string | 
 /**
  * Archive the full transcript to conversations/ before compaction.
  */
-function createPreCompactHook(): HookCallback {
+function createPreCompactHook(assistantName?: string): HookCallback {
   return async (input, _toolUseId, _context) => {
     const preCompact = input as PreCompactHookInput;
     const transcriptPath = preCompact.transcript_path;
@@ -180,7 +186,7 @@ function createPreCompactHook(): HookCallback {
       const filename = `${date}-${name}.md`;
       const filePath = path.join(conversationsDir, filename);
 
-      const markdown = formatTranscriptMarkdown(messages, summary);
+      const markdown = formatTranscriptMarkdown(messages, summary, assistantName);
       fs.writeFileSync(filePath, markdown);
 
       log(`Archived conversation to ${filePath}`);
@@ -193,8 +199,9 @@ function createPreCompactHook(): HookCallback {
 }
 
 // Secrets to strip from Bash tool subprocess environments.
-// These are needed by claude-code for API auth but should never
-// be visible to commands Kit runs.
+// Prevents leakage of sensitive credentials to arbitrary commands the agent runs.
+// GH_TOKEN is intentionally omitted — it's a BASH_SAFE_SECRET explicitly
+// exposed so the agent can use gh CLI for legitimate tool use.
 const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
 
 function createSanitizeBashHook(): HookCallback {
@@ -260,7 +267,7 @@ function parseTranscript(content: string): ParsedMessage[] {
   return messages;
 }
 
-function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | null): string {
+function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | null, assistantName?: string): string {
   const now = new Date();
   const formatDateTime = (d: Date) => d.toLocaleString('en-US', {
     month: 'short',
@@ -279,7 +286,7 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
   lines.push('');
 
   for (const msg of messages) {
-    const sender = msg.role === 'user' ? 'User' : 'Andy';
+    const sender = msg.role === 'user' ? 'User' : (assistantName || 'Assistant');
     const content = msg.content.length > 2000
       ? msg.content.slice(0, 2000) + '...'
       : msg.content;
@@ -302,7 +309,11 @@ function shouldClose(): boolean {
 }
 
 /**
- * Build content block array with text and images for Claude's vision API.
+ * Build content block array for Claude's API.
+ * - image/* → image block (vision)
+ * - application/pdf → document block (native PDF reading)
+ * - text/* → text block (UTF-8 content inlined)
+ * - else → text note with container path for Bash/Read tool use
  */
 function buildContentBlocks(
   text: string,
@@ -310,12 +321,32 @@ function buildContentBlocks(
 ): ContentBlock[] {
   const blocks: ContentBlock[] = [{ type: 'text', text }];
   for (const att of attachments) {
+    const ct = att.contentType;
     try {
-      const data = fs.readFileSync(att.containerPath, 'base64');
-      blocks.push({
-        type: 'image',
-        source: { type: 'base64', media_type: att.contentType, data },
-      });
+      if (ct.startsWith('image/')) {
+        const actualCt = detectImageContentType(att.containerPath, ct);
+        const data = fs.readFileSync(att.containerPath, 'base64');
+        blocks.push({
+          type: 'image',
+          source: { type: 'base64', media_type: actualCt, data },
+        });
+      } else if (ct === 'application/pdf') {
+        const data = fs.readFileSync(att.containerPath, 'base64');
+        blocks.push({
+          type: 'document',
+          source: { type: 'base64', media_type: 'application/pdf', data },
+        });
+      } else if (ct.startsWith('text/')) {
+        const fileText = fs.readFileSync(att.containerPath, 'utf-8');
+        const header = `[File: ${path.basename(att.containerPath)}]\n`;
+        blocks.push({ type: 'text', text: header + fileText });
+      } else {
+        // Binary file — agent uses Bash/Read tools to process it
+        blocks.push({
+          type: 'text',
+          text: `[Attached file: ${att.containerPath} (${ct}) — use Bash or Read tools to process]`,
+        });
+      }
     } catch (err) {
       log(`Failed to read attachment ${att.containerPath}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -458,6 +489,7 @@ async function runQuery(
   for await (const message of query({
     prompt: stream,
     options: {
+      model: 'claude-sonnet-4-6',
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
@@ -491,7 +523,7 @@ async function runQuery(
         },
       },
       hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook()] }],
+        PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
         PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
       },
     }
@@ -556,8 +588,9 @@ async function main(): Promise<void> {
     sdkEnv[key] = value;
   }
 
-  // Expose read-only tool tokens to process.env so Bash subprocesses (gh, etc.) can use them.
-  // Only non-sensitive tool tokens go here — never API keys or OAuth tokens.
+  // Expose scoped tool tokens to process.env so Bash subprocesses (gh, etc.) can use them.
+  // These are scoped tool tokens (not Claude auth credentials) — safe to expose to Bash subprocesses.
+  // Never put API keys or OAuth tokens here.
   const BASH_SAFE_SECRETS = ['GH_TOKEN'];
   for (const key of BASH_SAFE_SECRETS) {
     if (containerInput.secrets?.[key]) {

@@ -9,11 +9,11 @@ store/
 data/
 logs/
 
-# Groups - track CLAUDE.md for all groups, ignore runtime data
+# Groups - ignore all group contents except shared agent interaction config
 groups/*
 !groups/*/
 groups/*/*
-!groups/*/CLAUDE.md
+!groups/global/CLAUDE.md
 
 # Secrets
 *.keys.json

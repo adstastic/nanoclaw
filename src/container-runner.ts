@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, exec, spawn } from 'child_process';
+import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -14,13 +14,14 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   STORE_DIR,
+  TIMEZONE,
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
-import { CONTAINER_RUNTIME_BIN, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import { CONTAINER_RUNTIME_BIN, readonlyMountArgs, stopContainerArgs } from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
-import { RegisteredGroup } from './types.js';
+import { NewMessage, RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -33,6 +34,7 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  assistantName?: string;
   secrets?: Record<string, string>;
   attachments?: { containerPath: string; contentType: string }[];
 }
@@ -152,19 +154,18 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Copy agent-runner source into a per-group writable location so agents
-  // can customize it (add tools, change behavior) without affecting other
-  // groups. Recompiled on container startup via entrypoint.sh.
+  // Mount agent-runner source read-only. The container entrypoint compiles
+  // it on startup, but modifications must not persist to the host — a
+  // compromised agent could otherwise backdoor the MCP server or sanitize
+  // hook and have those changes take effect on the next invocation.
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
-  const groupAgentRunnerDir = path.join(DATA_DIR, 'sessions', group.folder, 'agent-runner-src');
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+  if (fs.existsSync(agentRunnerSrc)) {
+    mounts.push({
+      hostPath: agentRunnerSrc,
+      containerPath: '/app/src',
+      readonly: true,
+    });
   }
-  mounts.push({
-    hostPath: groupAgentRunnerDir,
-    containerPath: '/app/src',
-    readonly: false,
-  });
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
@@ -186,6 +187,8 @@ function buildVolumeMounts(
  * Per-group overrides: if groups/{folder}/.env exists, its values take
  * precedence over the global .env for the same keys. This allows scoping
  * tokens per group (e.g., a read-only GH_TOKEN for a monitoring agent).
+ *
+ * Only keys listed in `keys` can be overridden. Group .env files cannot introduce new env vars.
  */
 export function readSecrets(groupFolder: string): Record<string, string> {
   const keys = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'GH_TOKEN'];
@@ -194,23 +197,22 @@ export function readSecrets(groupFolder: string): Record<string, string> {
   let groupOverrides: Record<string, string> = {};
   try {
     const content = fs.readFileSync(groupEnvFile, 'utf-8');
-    // Reuse the same parsing logic — write a temp-free inline parse
+    const parsed: Record<string, string> = {};
     for (const line of content.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
       const eqIdx = trimmed.indexOf('=');
       if (eqIdx === -1) continue;
-      const key = trimmed.slice(0, eqIdx).trim();
-      if (!keys.includes(key)) continue;
-      let value = trimmed.slice(eqIdx + 1).trim();
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1);
+      const k = trimmed.slice(0, eqIdx).trim();
+      let v = trimmed.slice(eqIdx + 1).trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+        v = v.slice(1, -1);
       }
-      if (value) groupOverrides[key] = value;
+      if (v) parsed[k] = v;
     }
+    groupOverrides = Object.fromEntries(
+      Object.entries(parsed).filter(([k, v]) => keys.includes(k) && v),
+    ) as Record<string, string>;
   } catch {
     // No group .env — use global only
   }
@@ -221,6 +223,9 @@ const DEFAULT_CONTAINER_MEMORY = '4GiB';
 
 function buildContainerArgs(mounts: VolumeMount[], containerName: string, memory?: string): string[] {
   const args: string[] = ['run', '-i', '--rm', '-m', memory || DEFAULT_CONTAINER_MEMORY, '--name', containerName];
+
+  // Pass host timezone so container's local time matches the user's
+  args.push('-e', `TZ=${TIMEZONE}`);
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
@@ -395,9 +400,17 @@ export async function runContainerAgent(
     const killOnTimeout = () => {
       timedOut = true;
       logger.error({ group: group.name, containerName }, 'Container timeout, stopping gracefully');
-      exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
-        if (err) {
-          logger.warn({ group: group.name, containerName, err }, 'Graceful stop failed, force killing');
+      const [bin, ...args] = stopContainerArgs(containerName);
+      const stopProc = spawn(bin, args, { stdio: 'pipe' });
+      const stopTimeout = setTimeout(() => {
+        logger.warn({ group: group.name, containerName }, 'Graceful stop timed out, force killing');
+        stopProc.kill();
+        container.kill('SIGKILL');
+      }, 15000);
+      stopProc.on('close', (stopCode) => {
+        clearTimeout(stopTimeout);
+        if (stopCode !== 0) {
+          logger.warn({ group: group.name, containerName, stopCode }, 'Graceful stop failed, force killing');
           container.kill('SIGKILL');
         }
       });
@@ -614,44 +627,34 @@ export async function runContainerAgent(
   });
 }
 
-const CONTENT_TYPE_FROM_EXT: Record<string, string> = {
-  jpg: 'image/jpeg', jpeg: 'image/jpeg',
-  png: 'image/png', gif: 'image/gif', webp: 'image/webp',
-};
-
 /**
- * Scan store/attachments/ for files matching the given message IDs,
- * copy them into the group's IPC attachments directory (mounted in container),
- * and return metadata for the container input.
+ * Copy attachments from host storage into the group's IPC attachments directory
+ * (which is bind-mounted at /workspace/ipc in the container) and return
+ * container-relative path + content type metadata for the container input.
+ *
+ * Uses attachment metadata already stored on the NewMessage (hostPath, contentType,
+ * filename) — no disk scanning or extension-based content-type re-derivation.
  */
 export function prepareAttachmentsForContainer(
-  messageIds: string[],
+  messages: NewMessage[],
   groupFolder: string,
 ): { containerPath: string; contentType: string }[] {
-  const attachmentsDir = path.join(STORE_DIR, 'attachments');
   const groupIpcDir = resolveGroupIpcPath(groupFolder);
   const ipcAttachmentsDir = path.join(groupIpcDir, 'attachments');
   const result: { containerPath: string; contentType: string }[] = [];
 
-  for (const msgId of messageIds) {
-    const msgDir = path.join(attachmentsDir, msgId);
-    if (!fs.existsSync(msgDir)) continue;
+  for (const msg of messages) {
+    if (!msg.attachments?.length) continue;
 
-    let files: string[];
-    try { files = fs.readdirSync(msgDir); } catch { continue; }
-
-    for (const file of files) {
-      if (file.startsWith('.')) continue;
-      const srcPath = path.join(msgDir, file);
-      const destDir = path.join(ipcAttachmentsDir, msgId);
+    for (const att of msg.attachments) {
+      const filename = att.filename || path.basename(att.hostPath);
+      const destDir = path.join(ipcAttachmentsDir, msg.id);
       fs.mkdirSync(destDir, { recursive: true });
-      fs.copyFileSync(srcPath, path.join(destDir, file));
+      fs.copyFileSync(att.hostPath, path.join(destDir, filename));
 
-      const ext = path.extname(file).slice(1).toLowerCase();
-      const contentType = CONTENT_TYPE_FROM_EXT[ext] || 'application/octet-stream';
       result.push({
-        containerPath: `/workspace/ipc/attachments/${msgId}/${file}`,
-        contentType,
+        containerPath: `/workspace/ipc/attachments/${msg.id}/${filename}`,
+        contentType: att.contentType,
       });
     }
   }

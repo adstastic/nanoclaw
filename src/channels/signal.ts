@@ -19,6 +19,10 @@ function extFromContentType(ct: string): string {
   const map: Record<string, string> = {
     'image/jpeg': 'jpg', 'image/png': 'png',
     'image/gif': 'gif', 'image/webp': 'webp',
+    'application/pdf': 'pdf',
+    'text/plain': 'txt',
+    'text/csv': 'csv',
+    'text/markdown': 'md',
   };
   return map[ct] || 'bin';
 }
@@ -265,24 +269,57 @@ export class SignalChannel implements Channel {
     // Build content from text + attachments
     let content = messageText;
     const rawAttachments: any[] = dataMessage.attachments || [];
-    const imageAttachments: Attachment[] = [];
+    const downloadedAttachments: Attachment[] = [];
 
     for (let i = 0; i < rawAttachments.length; i++) {
       const att = rawAttachments[i];
       const ct: string = att.contentType || '';
 
-      if (IMAGE_CONTENT_TYPES.has(ct) && att.id) {
-        const ext = extFromContentType(ct);
-        const filename = att.filename || `image-${i}.${ext}`;
-        const attachDir = path.join(STORE_DIR, 'attachments', msgId);
-        const filePath = path.join(attachDir, `${i}.${ext}`);
-
-        const ok = await this.downloadAttachment(att.id, filePath);
-        if (ok) {
-          imageAttachments.push({ hostPath: filePath, contentType: ct, filename });
+      // Signal sends long messages (>2000 chars) as a text/x-signal-plain attachment
+      // containing the full text — the body is truncated. Download and use the full text.
+      if (ct === 'text/x-signal-plain' && att.id) {
+        try {
+          const res = await fetch(`${this.apiUrl}/v1/attachments/${att.id}`);
+          if (res.ok) {
+            const fullText = await res.text();
+            if (fullText.length > content.length) {
+              content = fullText;
+              logger.debug({ attachmentId: att.id, length: fullText.length }, 'Long message attachment reassembled');
+            }
+          }
+        } catch (err) {
+          logger.warn({ attachmentId: att.id, err }, 'Failed to download long-message attachment');
+          if (content) {
+            content = `[Note: long message — full text unavailable, showing partial content]\n${content}`;
+          } else {
+            content = '[Note: long message — full text unavailable, showing partial content]';
+          }
         }
-        content = content ? `${content} [Image: ${filename}]` : `[Image: ${filename}]`;
+      } else if (att.id) {
+        const ctBase = ct.split('/')[0];
+        const isSupported =
+          ctBase === 'image' ||
+          ct === 'application/pdf' ||
+          ctBase === 'text';
+
+        if (!isSupported) {
+          logger.warn({ attachmentId: att.id, contentType: ct }, 'Skipping unsupported attachment type');
+        } else {
+          const ext = extFromContentType(ct);
+          const isImage = ctBase === 'image';
+          const displayName = att.filename || (isImage ? `image-${i}.${ext}` : `attachment-${i}.${ext}`);
+          const attachDir = path.join(STORE_DIR, 'attachments', msgId);
+          const filePath = path.join(attachDir, `${i}.${ext}`);
+
+          const ok = await this.downloadAttachment(att.id, filePath);
+          if (ok) {
+            downloadedAttachments.push({ hostPath: filePath, contentType: ct, filename: displayName });
+          }
+          const label = isImage ? `[Image: ${displayName}]` : `[File: ${displayName}]`;
+          content = content ? `${content} ${label}` : label;
+        }
       } else {
+        // No id — can't download, show a type-appropriate placeholder
         const type = ct.split('/')[0];
         let placeholder: string;
         switch (type) {
@@ -343,7 +380,7 @@ export class SignalChannel implements Channel {
       timestamp,
       is_from_me: false,
       is_reply_to_bot: isReplyToBot,
-      attachments: imageAttachments.length > 0 ? imageAttachments : undefined,
+      attachments: downloadedAttachments.length > 0 ? downloadedAttachments : undefined,
     });
 
     logger.info(
@@ -463,13 +500,14 @@ export class SignalChannel implements Channel {
         });
         if (!res.ok) {
           const detail = await res.text().catch(() => '');
-          logger.error({ jid, status: res.status, detail }, 'Signal send failed');
+          throw new Error(`Signal send failed: HTTP ${res.status} — ${detail}`);
         }
       }
 
       logger.info({ jid, length: text.length }, 'Signal message sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Signal message');
+      throw err;
     }
   }
 
@@ -513,28 +551,11 @@ export class SignalChannel implements Channel {
     }
   }
 
-  async setTyping(jid: string, isTyping: boolean): Promise<void> {
-    try {
-      const stripped = jid.replace(/^sig:/, '');
-      const method = isTyping ? 'PUT' : 'DELETE';
-
-      const body: any = { recipient: stripped };
-
-      await fetch(`${this.apiUrl}/v1/typing-indicator/${this.phoneNumber}`, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-    } catch (err) {
-      logger.debug({ jid, err }, 'Failed to send Signal typing indicator');
-    }
-  }
-
   isConnected(): boolean {
     return this.connected;
   }
 
-  ownsJid(jid: string): boolean {
+  handlesJid(jid: string): boolean {
     return jid.startsWith('sig:');
   }
 
