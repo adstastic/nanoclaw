@@ -518,15 +518,7 @@ export class SignalChannel implements Channel {
       const stripped = jid.replace(/^sig:/, '');
       const method = isTyping ? 'PUT' : 'DELETE';
 
-      const body: any = {};
-      if (stripped.startsWith('+')) {
-        body.recipient = stripped;
-      } else if (stripped.startsWith('group.')) {
-        // Decode group.xxx back to internal ID for typing API
-        body.group = Buffer.from(stripped.slice('group.'.length), 'base64').toString('utf-8');
-      } else {
-        body.group = stripped;
-      }
+      const body: any = { recipient: stripped };
 
       await fetch(`${this.apiUrl}/v1/typing-indicator/${this.phoneNumber}`, {
         method,

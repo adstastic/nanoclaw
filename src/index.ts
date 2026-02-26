@@ -168,14 +168,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     'Processing messages',
   );
 
-  // For Signal: react with ⚡ and set reply target for quote-reply
+  // For Signal: react with ⚡ on every pending message and set reply target
   const lastMsg = missedMessages[missedMessages.length - 1];
   if (chatJid.startsWith('sig:') && 'sendReaction' in channel) {
-    const dashIdx = lastMsg.id.indexOf('-');
-    if (dashIdx > 0) {
-      const targetTimestamp = parseInt(lastMsg.id.slice(0, dashIdx), 10);
-      const targetAuthor = lastMsg.id.slice(dashIdx + 1);
-      (channel as any).sendReaction(chatJid, '⚡', targetTimestamp, targetAuthor).catch(() => {});
+    for (const msg of missedMessages) {
+      const dashIdx = msg.id.indexOf('-');
+      if (dashIdx > 0) {
+        const targetTimestamp = parseInt(msg.id.slice(0, dashIdx), 10);
+        const targetAuthor = msg.id.slice(dashIdx + 1);
+        (channel as any).sendReaction(chatJid, '⚡', targetTimestamp, targetAuthor).catch(() => {});
+      }
     }
     // Set reply target so the first response quotes the triggering message
     if ('setReplyTarget' in channel) {
