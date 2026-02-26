@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { detectImageContentType } from './content-type.js';
 
 type TextContentBlock = { type: 'text'; text: string };
 type ImageContentBlock = {
@@ -324,10 +325,11 @@ function buildContentBlocks(
     const ct = att.contentType;
     try {
       if (ct.startsWith('image/')) {
+        const actualCt = detectImageContentType(att.containerPath, ct);
         const data = fs.readFileSync(att.containerPath, 'base64');
         blocks.push({
           type: 'image',
-          source: { type: 'base64', media_type: ct, data },
+          source: { type: 'base64', media_type: actualCt, data },
         });
       } else if (ct === 'application/pdf') {
         const data = fs.readFileSync(att.containerPath, 'base64');
