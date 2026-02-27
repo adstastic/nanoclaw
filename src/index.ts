@@ -414,15 +414,43 @@ async function startMessageLoop(): Promise<void> {
 
 /**
  * Startup recovery: check for unprocessed messages in registered groups.
- * Handles crash between advancing lastTimestamp and processing messages.
+ * Handles crash between advancing lastAgentTimestamp and processing messages.
+ * Messages older than the recovery age are considered stale and dropped — the
+ * cursor is advanced past them to prevent spamming users after prolonged downtime.
+ * Recovery age is configurable per group via containerConfig.recoveryAge (seconds).
  */
 function recoverPendingMessages(): void {
+  const DEFAULT_RECOVERY_AGE_S = 86400; // 1 day
+
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
+    const recoveryAgeMs = (group.containerConfig?.recoveryAge ?? DEFAULT_RECOVERY_AGE_S) * 1000;
+    const cutoff = new Date(Date.now() - recoveryAgeMs).toISOString();
+
     const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
     const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
-    if (pending.length > 0) {
+    const recent = pending.filter((m) => m.timestamp >= cutoff);
+
+    if (recent.length < pending.length) {
+      const stale = pending.filter((m) => m.timestamp < cutoff);
       logger.info(
-        { group: group.name, pendingCount: pending.length },
+        {
+          group: group.name,
+          skipped: stale.length,
+          dropped: stale.map((m) => ({ id: m.id, sender: m.sender_name, ts: m.timestamp })),
+        },
+        'Recovery: dropping stale messages older than %ds',
+        recoveryAgeMs / 1000,
+      );
+      // Advance cursor past stale messages so they're never reprocessed
+      if (stale.length > 0) {
+        lastAgentTimestamp[chatJid] = stale[stale.length - 1].timestamp;
+        saveState();
+      }
+    }
+
+    if (recent.length > 0) {
+      logger.info(
+        { group: group.name, pendingCount: recent.length },
         'Recovery: found unprocessed messages',
       );
       queue.enqueueMessageCheck(chatJid);

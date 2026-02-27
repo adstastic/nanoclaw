@@ -135,6 +135,15 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+
+  // Add source_device column if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE messages ADD COLUMN source_device INTEGER`,
+    );
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -259,8 +268,8 @@ export function setLastGroupSync(): void {
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
     `INSERT OR REPLACE INTO messages
-      (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, is_reply_to_bot, attachments)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, is_reply_to_bot, attachments, source_device)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -272,6 +281,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.is_bot_message ? 1 : 0,
     msg.is_reply_to_bot ? 1 : 0,
     msg.attachments?.length ? JSON.stringify(msg.attachments) : null,
+    msg.source_device ?? null,
   );
 }
 
@@ -313,7 +323,7 @@ export function getNewMessages(
   // Filter bot messages using both the is_bot_message flag AND the content
   // prefix as a backstop for messages written before the migration ran.
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, is_reply_to_bot, attachments
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, is_reply_to_bot, attachments, source_device
     FROM messages
     WHERE timestamp > ? AND chat_jid IN (${placeholders})
       AND is_bot_message = 0 AND content NOT LIKE ?
@@ -347,7 +357,7 @@ export function getMessagesSince(
   // Filter bot messages using both the is_bot_message flag AND the content
   // prefix as a backstop for messages written before the migration ran.
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, is_reply_to_bot, attachments
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, is_reply_to_bot, attachments, source_device
     FROM messages
     WHERE chat_jid = ? AND timestamp > ?
       AND is_bot_message = 0 AND content NOT LIKE ?

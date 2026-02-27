@@ -217,6 +217,9 @@ export class SignalChannel implements Channel {
     const dataMessage = msg.dataMessage;
     if (!dataMessage) return;
 
+    const rawDevice = msg.sourceDevice;
+    const sourceDevice: number | undefined = typeof rawDevice === 'number' ? rawDevice : undefined;
+
     const timestamp = new Date(dataMessage.timestamp).toISOString();
 
     // Determine chat JID
@@ -406,6 +409,7 @@ export class SignalChannel implements Channel {
       timestamp,
       is_from_me: false,
       is_reply_to_bot: isReplyToBot,
+      source_device: sourceDevice,
       attachments: downloadedAttachments.length > 0 ? downloadedAttachments : undefined,
     });
 
