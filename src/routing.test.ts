@@ -98,7 +98,7 @@ describe('getAvailableGroups', () => {
     _setRegisteredGroups({
       'reg@g.us': {
         name: 'Registered',
-        folder: 'registered',
+        workspace: 'registered',
         trigger: '@Andy',
         added_at: '2024-01-01T00:00:00.000Z',
       },
@@ -166,7 +166,7 @@ describe('getAvailableGroups', () => {
     _setRegisteredGroups({
       'tg:100200300': {
         name: 'TG Registered',
-        folder: 'tg-registered',
+        workspace: 'tg-registered',
         trigger: '@Andy',
         added_at: '2024-01-01T00:00:00.000Z',
       },

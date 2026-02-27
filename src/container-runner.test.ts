@@ -97,14 +97,14 @@ const mockedFs = vi.mocked(fs);
 
 const testGroup: RegisteredGroup = {
   name: 'Test Group',
-  folder: 'test-group',
+  workspace: 'test-group',
   trigger: '@Andy',
   added_at: new Date().toISOString(),
 };
 
 const testInput = {
   prompt: 'Hello',
-  groupFolder: 'test-group',
+  workspace: 'test-group',
   chatJid: 'test@g.us',
   isMain: false,
 };

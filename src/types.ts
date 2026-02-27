@@ -43,7 +43,7 @@ export interface ContainerConfig {
 
 export interface RegisteredGroup {
   name: string;
-  folder: string;
+  workspace: string;
   trigger: string;
   added_at: string;
   containerConfig?: ContainerConfig;
@@ -67,7 +67,7 @@ export interface NewMessage {
 
 export interface ScheduledTask {
   id: string;
-  group_folder: string;
+  workspace: string;
   chat_jid: string;
   prompt: string;
   schedule_type: 'cron' | 'interval' | 'once';

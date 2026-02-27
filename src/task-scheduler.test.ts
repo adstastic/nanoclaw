@@ -20,7 +20,7 @@ describe('task scheduler', () => {
   it('pauses due tasks with invalid group folders to prevent retry churn', async () => {
     createTask({
       id: 'task-invalid-folder',
-      group_folder: '../../outside',
+      workspace: '../../outside',
       chat_jid: 'bad@g.us',
       prompt: 'run',
       schedule_type: 'once',

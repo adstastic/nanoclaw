@@ -17,7 +17,7 @@ const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
-const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
+const workspace = process.env.NANOCLAW_WORKSPACE!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
 
 function writeIpcFile(dir: string, data: object): string {
@@ -52,7 +52,7 @@ server.tool(
       chatJid,
       text: args.text,
       sender: args.sender || undefined,
-      groupFolder,
+      workspace,
       timestamp: new Date().toISOString(),
     };
 
@@ -75,7 +75,7 @@ server.tool(
       chatJid,
       emoji: args.emoji,
       messageId: args.message_id,
-      groupFolder,
+      workspace,
       timestamp: new Date().toISOString(),
     };
 
@@ -113,7 +113,7 @@ server.tool(
       chatJid,
       imagePath: args.image_path,
       caption: args.caption || undefined,
-      groupFolder,
+      workspace,
       timestamp: new Date().toISOString(),
     };
 
@@ -198,7 +198,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       schedule_value: args.schedule_value,
       context_mode: args.context_mode || 'group',
       targetJid,
-      createdBy: groupFolder,
+      createdBy: workspace,
       timestamp: new Date().toISOString(),
     };
 
@@ -226,7 +226,7 @@ server.tool(
 
       const tasks = isMain
         ? allTasks
-        : allTasks.filter((t: { groupFolder: string }) => t.groupFolder === groupFolder);
+        : allTasks.filter((t: { workspace: string }) => t.workspace === workspace);
 
       if (tasks.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No scheduled tasks found.' }] };
@@ -256,7 +256,7 @@ server.tool(
     const data = {
       type: 'pause_task',
       taskId: args.task_id,
-      groupFolder,
+      workspace,
       isMain,
       timestamp: new Date().toISOString(),
     };
@@ -275,7 +275,7 @@ server.tool(
     const data = {
       type: 'resume_task',
       taskId: args.task_id,
-      groupFolder,
+      workspace,
       isMain,
       timestamp: new Date().toISOString(),
     };
@@ -294,7 +294,7 @@ server.tool(
     const data = {
       type: 'cancel_task',
       taskId: args.task_id,
-      groupFolder,
+      workspace,
       isMain,
       timestamp: new Date().toISOString(),
     };
@@ -309,11 +309,11 @@ server.tool(
   'register_group',
   `Register a new WhatsApp group so the agent can respond to messages there. Main group only.
 
-Use available_groups.json to find the JID for a group. The folder name should be lowercase with hyphens (e.g., "family-chat").`,
+Use available_groups.json to find the JID for a group. The workspace name should be lowercase with hyphens (e.g., "family-chat").`,
   {
     jid: z.string().describe('The WhatsApp JID (e.g., "120363336345536173@g.us")'),
     name: z.string().describe('Display name for the group'),
-    folder: z.string().describe('Folder name for group files (lowercase, hyphens, e.g., "family-chat")'),
+    workspace: z.string().describe('Workspace name for group files (lowercase, hyphens, e.g., "family-chat")'),
     trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
   },
   async (args) => {
@@ -328,7 +328,7 @@ Use available_groups.json to find the JID for a group. The folder name should be
       type: 'register_group',
       jid: args.jid,
       name: args.name,
-      folder: args.folder,
+      workspace: args.workspace,
       trigger: args.trigger,
       timestamp: new Date().toISOString(),
     };

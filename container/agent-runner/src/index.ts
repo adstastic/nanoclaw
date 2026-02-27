@@ -34,7 +34,7 @@ type ContentBlock = TextContentBlock | ImageContentBlock | DocumentContentBlock;
 interface ContainerInput {
   prompt: string;
   sessionId?: string;
-  groupFolder: string;
+  workspace: string;
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
@@ -521,7 +521,7 @@ async function runQuery(
           args: [mcpServerPath],
           env: {
             NANOCLAW_CHAT_JID: containerInput.chatJid,
-            NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+            NANOCLAW_WORKSPACE: containerInput.workspace,
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
@@ -575,7 +575,7 @@ async function main(): Promise<void> {
     containerInput = JSON.parse(stdinData);
     // Delete the temp file the entrypoint wrote — it contains secrets
     try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
-    log(`Received input for group: ${containerInput.groupFolder}`);
+    log(`Received input for group: ${containerInput.workspace}`);
   } catch (err) {
     writeOutput({
       status: 'error',

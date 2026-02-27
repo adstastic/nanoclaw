@@ -14,21 +14,21 @@ import { RegisteredGroup } from './types.js';
 // Set up registered groups used across tests
 const MAIN_GROUP: RegisteredGroup = {
   name: 'Main',
-  folder: 'main',
+  workspace: 'main',
   trigger: 'always',
   added_at: '2024-01-01T00:00:00.000Z',
 };
 
 const OTHER_GROUP: RegisteredGroup = {
   name: 'Other',
-  folder: 'other-group',
+  workspace: 'other-group',
   trigger: '@Andy',
   added_at: '2024-01-01T00:00:00.000Z',
 };
 
 const THIRD_GROUP: RegisteredGroup = {
   name: 'Third',
-  folder: 'third-group',
+  workspace: 'third-group',
   trigger: '@Andy',
   added_at: '2024-01-01T00:00:00.000Z',
 };
@@ -84,7 +84,7 @@ describe('schedule_task authorization', () => {
     // Verify task was created in DB for the other group
     const allTasks = getAllTasks();
     expect(allTasks.length).toBe(1);
-    expect(allTasks[0].group_folder).toBe('other-group');
+    expect(allTasks[0].workspace).toBe('other-group');
   });
 
   it('non-main group can schedule for itself', async () => {
@@ -103,7 +103,7 @@ describe('schedule_task authorization', () => {
 
     const allTasks = getAllTasks();
     expect(allTasks.length).toBe(1);
-    expect(allTasks[0].group_folder).toBe('other-group');
+    expect(allTasks[0].workspace).toBe('other-group');
   });
 
   it('non-main group cannot schedule for another group', async () => {
@@ -149,7 +149,7 @@ describe('pause_task authorization', () => {
   beforeEach(() => {
     createTask({
       id: 'task-main',
-      group_folder: 'main',
+      workspace: 'main',
       chat_jid: 'main@g.us',
       prompt: 'main task',
       schedule_type: 'once',
@@ -161,7 +161,7 @@ describe('pause_task authorization', () => {
     });
     createTask({
       id: 'task-other',
-      group_folder: 'other-group',
+      workspace: 'other-group',
       chat_jid: 'other@g.us',
       prompt: 'other task',
       schedule_type: 'once',
@@ -195,7 +195,7 @@ describe('resume_task authorization', () => {
   beforeEach(() => {
     createTask({
       id: 'task-paused',
-      group_folder: 'other-group',
+      workspace: 'other-group',
       chat_jid: 'other@g.us',
       prompt: 'paused task',
       schedule_type: 'once',
@@ -229,7 +229,7 @@ describe('cancel_task authorization', () => {
   it('main group can cancel any task', async () => {
     createTask({
       id: 'task-to-cancel',
-      group_folder: 'other-group',
+      workspace: 'other-group',
       chat_jid: 'other@g.us',
       prompt: 'cancel me',
       schedule_type: 'once',
@@ -247,7 +247,7 @@ describe('cancel_task authorization', () => {
   it('non-main group can cancel its own task', async () => {
     createTask({
       id: 'task-own',
-      group_folder: 'other-group',
+      workspace: 'other-group',
       chat_jid: 'other@g.us',
       prompt: 'my task',
       schedule_type: 'once',
@@ -265,7 +265,7 @@ describe('cancel_task authorization', () => {
   it('non-main group cannot cancel another groups task', async () => {
     createTask({
       id: 'task-foreign',
-      group_folder: 'main',
+      workspace: 'main',
       chat_jid: 'main@g.us',
       prompt: 'not yours',
       schedule_type: 'once',
@@ -290,7 +290,7 @@ describe('register_group authorization', () => {
         type: 'register_group',
         jid: 'new@g.us',
         name: 'New Group',
-        folder: 'new-group',
+        workspace: 'new-group',
         trigger: '@Andy',
       },
       'other-group',
@@ -308,7 +308,7 @@ describe('register_group authorization', () => {
         type: 'register_group',
         jid: 'new@g.us',
         name: 'New Group',
-        folder: '../../outside',
+        workspace: '../../outside',
         trigger: '@Andy',
       },
       'main',
@@ -332,7 +332,7 @@ describe('refresh_groups authorization', () => {
 
 // --- IPC message authorization ---
 // Tests the authorization pattern from startIpcWatcher (ipc.ts).
-// The logic: isMain || (targetGroup && targetGroup.folder === sourceGroup)
+// The logic: isMain || (targetGroup && targetGroup.workspace === sourceGroup)
 
 describe('IPC message authorization', () => {
   // Replicate the exact check from the IPC watcher
@@ -343,7 +343,7 @@ describe('IPC message authorization', () => {
     registeredGroups: Record<string, RegisteredGroup>,
   ): boolean {
     const targetGroup = registeredGroups[targetChatJid];
-    return isMain || (!!targetGroup && targetGroup.folder === sourceGroup);
+    return isMain || (!!targetGroup && targetGroup.workspace === sourceGroup);
   }
 
   it('main group can send to any group', () => {
@@ -577,7 +577,7 @@ describe('register_group success', () => {
         type: 'register_group',
         jid: 'new@g.us',
         name: 'New Group',
-        folder: 'new-group',
+        workspace: 'new-group',
         trigger: '@Andy',
       },
       'main',
@@ -589,7 +589,7 @@ describe('register_group success', () => {
     const group = getRegisteredGroup('new@g.us');
     expect(group).toBeDefined();
     expect(group!.name).toBe('New Group');
-    expect(group!.folder).toBe('new-group');
+    expect(group!.workspace).toBe('new-group');
     expect(group!.trigger).toBe('@Andy');
   });
 
@@ -599,7 +599,7 @@ describe('register_group success', () => {
         type: 'register_group',
         jid: 'partial@g.us',
         name: 'Partial',
-        // missing folder and trigger
+        // missing workspace and trigger
       },
       'main',
       true,
