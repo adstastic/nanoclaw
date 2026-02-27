@@ -17,7 +17,7 @@ RUN cmake -B build \
 # Stage 2: minimal runtime image
 FROM ubuntu:24.04
 
-RUN apt-get update && apt-get install -y libcurl4 libgomp1 ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y libcurl4 libgomp1 && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /whisper/build/bin/whisper-server /usr/local/bin/whisper-server
 
