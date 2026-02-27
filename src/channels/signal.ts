@@ -217,7 +217,8 @@ export class SignalChannel implements Channel {
     const dataMessage = msg.dataMessage;
     if (!dataMessage) return;
 
-    const sourceDevice: number | undefined = msg.sourceDevice;
+    const rawDevice = msg.sourceDevice;
+    const sourceDevice: number | undefined = typeof rawDevice === 'number' ? rawDevice : undefined;
 
     const timestamp = new Date(dataMessage.timestamp).toISOString();
 

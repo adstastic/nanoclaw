@@ -59,6 +59,7 @@ export interface NewMessage {
   is_from_me?: boolean;
   is_bot_message?: boolean;
   is_reply_to_bot?: boolean;
+  /** Signal source device ID (1 = primary/mobile, 2+ = linked device e.g. desktop) */
   source_device?: number;
   attachments?: Attachment[];
 }

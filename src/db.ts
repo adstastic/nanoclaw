@@ -323,7 +323,7 @@ export function getNewMessages(
   // Filter bot messages using both the is_bot_message flag AND the content
   // prefix as a backstop for messages written before the migration ran.
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, is_reply_to_bot, attachments
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, is_reply_to_bot, attachments, source_device
     FROM messages
     WHERE timestamp > ? AND chat_jid IN (${placeholders})
       AND is_bot_message = 0 AND content NOT LIKE ?
@@ -357,7 +357,7 @@ export function getMessagesSince(
   // Filter bot messages using both the is_bot_message flag AND the content
   // prefix as a backstop for messages written before the migration ran.
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp, is_reply_to_bot, attachments
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, is_reply_to_bot, attachments, source_device
     FROM messages
     WHERE chat_jid = ? AND timestamp > ?
       AND is_bot_message = 0 AND content NOT LIKE ?
