@@ -417,12 +417,32 @@ async function startMessageLoop(): Promise<void> {
  * Handles crash between advancing lastTimestamp and processing messages.
  */
 function recoverPendingMessages(): void {
+  const MAX_RECOVERY_AGE_MS = 5 * 60 * 1000; // 5 minutes
+  const cutoff = new Date(Date.now() - MAX_RECOVERY_AGE_MS).toISOString();
+
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
     const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
     const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
-    if (pending.length > 0) {
+    const recent = pending.filter((m) => m.timestamp >= cutoff);
+
+    if (recent.length < pending.length) {
       logger.info(
-        { group: group.name, pendingCount: pending.length },
+        { group: group.name, skipped: pending.length - recent.length },
+        'Recovery: skipping stale messages older than 5 minutes',
+      );
+      // Advance cursor past stale messages so they're never reprocessed
+      if (pending.length > 0) {
+        const lastStale = pending[pending.length - 1];
+        if (recent.length === 0) {
+          lastAgentTimestamp[chatJid] = lastStale.timestamp;
+          saveState();
+        }
+      }
+    }
+
+    if (recent.length > 0) {
+      logger.info(
+        { group: group.name, pendingCount: recent.length },
         'Recovery: found unprocessed messages',
       );
       queue.enqueueMessageCheck(chatJid);

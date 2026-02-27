@@ -59,6 +59,7 @@ export interface NewMessage {
   is_from_me?: boolean;
   is_bot_message?: boolean;
   is_reply_to_bot?: boolean;
+  source_device?: number;
   attachments?: Attachment[];
 }
 
