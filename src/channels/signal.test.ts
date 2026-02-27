@@ -124,14 +124,14 @@ function createTestOpts(
     registeredGroups: vi.fn(() => ({
       'sig:+15559990000': {
         name: 'Personal DM',
-        folder: 'main',
+        workspace: 'main',
         trigger: '@Andy',
         added_at: '2024-01-01T00:00:00.000Z',
       },
       // groupId 'groupABC123' → base64 'Z3JvdXBBQkMxMjM=' → JID 'sig:group.Z3JvdXBBQkMxMjM='
       'sig:group.Z3JvdXBBQkMxMjM=': {
         name: 'Team Chat',
-        folder: 'team',
+        workspace: 'team',
         trigger: '@Andy',
         added_at: '2024-01-01T00:00:00.000Z',
       },

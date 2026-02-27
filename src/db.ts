@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
-import { isValidGroupFolder } from './group-folder.js';
+import { isValidWorkspace } from './workspace.js';
 import { logger } from './logger.js';
 import { NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.js';
 
@@ -34,7 +34,7 @@ function createSchema(database: Database.Database): void {
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
-      group_folder TEXT NOT NULL,
+      workspace TEXT NOT NULL,
       chat_jid TEXT NOT NULL,
       prompt TEXT NOT NULL,
       schedule_type TEXT NOT NULL,
@@ -65,13 +65,13 @@ function createSchema(database: Database.Database): void {
       value TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
-      group_folder TEXT PRIMARY KEY,
+      workspace TEXT PRIMARY KEY,
       session_id TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS registered_groups (
       jid TEXT PRIMARY KEY,
       name TEXT NOT NULL,
-      folder TEXT NOT NULL UNIQUE,
+      workspace TEXT NOT NULL UNIQUE,
       trigger_pattern TEXT NOT NULL,
       added_at TEXT NOT NULL,
       container_config TEXT,
@@ -143,6 +143,54 @@ function createSchema(database: Database.Database): void {
     );
   } catch {
     /* column already exists */
+  }
+
+  // Drop UNIQUE constraint on workspace in registered_groups (allow many-to-one JID→workspace)
+  const migrated = database
+    .prepare(`SELECT value FROM router_state WHERE key = 'migration_drop_folder_unique'`)
+    .get() as { value: string } | undefined;
+  if (!migrated) {
+    database.exec(`BEGIN TRANSACTION`);
+    try {
+      database.exec(`
+        CREATE TABLE registered_groups_new (
+          jid TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          workspace TEXT NOT NULL,
+          trigger_pattern TEXT NOT NULL,
+          added_at TEXT NOT NULL,
+          container_config TEXT,
+          requires_trigger INTEGER DEFAULT 1
+        );
+        INSERT INTO registered_groups_new SELECT * FROM registered_groups;
+        DROP TABLE registered_groups;
+        ALTER TABLE registered_groups_new RENAME TO registered_groups;
+      `);
+      database.prepare(
+        `INSERT OR REPLACE INTO router_state (key, value) VALUES ('migration_drop_folder_unique', '1')`,
+      ).run();
+      database.exec(`COMMIT`);
+    } catch (err) {
+      database.exec(`ROLLBACK`);
+      throw err;
+    }
+  }
+
+  // Rename folder → workspace columns across tables (existing DBs only;
+  // fresh DBs already use the new names so the ALTERs are skipped).
+  const wsRenamed = database
+    .prepare(`SELECT value FROM router_state WHERE key = 'migration_rename_folder_to_workspace'`)
+    .get() as { value: string } | undefined;
+  if (!wsRenamed) {
+    const renameCol = (sql: string) => {
+      try { database.exec(sql); } catch { /* column already has new name */ }
+    };
+    renameCol(`ALTER TABLE registered_groups RENAME COLUMN folder TO workspace`);
+    renameCol(`ALTER TABLE sessions RENAME COLUMN group_folder TO workspace`);
+    renameCol(`ALTER TABLE scheduled_tasks RENAME COLUMN group_folder TO workspace`);
+    database.prepare(
+      `INSERT OR REPLACE INTO router_state (key, value) VALUES ('migration_rename_folder_to_workspace', '1')`,
+    ).run();
   }
 }
 
@@ -378,12 +426,12 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
+    INSERT INTO scheduled_tasks (id, workspace, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
-    task.group_folder,
+    task.workspace,
     task.chat_jid,
     task.prompt,
     task.schedule_type,
@@ -401,12 +449,12 @@ export function getTaskById(id: string): ScheduledTask | undefined {
     | undefined;
 }
 
-export function getTasksForGroup(groupFolder: string): ScheduledTask[] {
+export function getTasksForGroup(workspace: string): ScheduledTask[] {
   return db
     .prepare(
-      'SELECT * FROM scheduled_tasks WHERE group_folder = ? ORDER BY created_at DESC',
+      'SELECT * FROM scheduled_tasks WHERE workspace = ? ORDER BY created_at DESC',
     )
-    .all(groupFolder) as ScheduledTask[];
+    .all(workspace) as ScheduledTask[];
 }
 
 export function getAllTasks(): ScheduledTask[] {
@@ -523,26 +571,26 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
-export function getSession(groupFolder: string): string | undefined {
+export function getSession(workspace: string): string | undefined {
   const row = db
-    .prepare('SELECT session_id FROM sessions WHERE group_folder = ?')
-    .get(groupFolder) as { session_id: string } | undefined;
+    .prepare('SELECT session_id FROM sessions WHERE workspace = ?')
+    .get(workspace) as { session_id: string } | undefined;
   return row?.session_id;
 }
 
-export function setSession(groupFolder: string, sessionId: string): void {
+export function setSession(workspace: string, sessionId: string): void {
   db.prepare(
-    'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
-  ).run(groupFolder, sessionId);
+    'INSERT OR REPLACE INTO sessions (workspace, session_id) VALUES (?, ?)',
+  ).run(workspace, sessionId);
 }
 
 export function getAllSessions(): Record<string, string> {
   const rows = db
-    .prepare('SELECT group_folder, session_id FROM sessions')
-    .all() as Array<{ group_folder: string; session_id: string }>;
+    .prepare('SELECT workspace, session_id FROM sessions')
+    .all() as Array<{ workspace: string; session_id: string }>;
   const result: Record<string, string> = {};
   for (const row of rows) {
-    result[row.group_folder] = row.session_id;
+    result[row.workspace] = row.session_id;
   }
   return result;
 }
@@ -558,7 +606,7 @@ export function getRegisteredGroup(
     | {
         jid: string;
         name: string;
-        folder: string;
+        workspace: string;
         trigger_pattern: string;
         added_at: string;
         container_config: string | null;
@@ -566,17 +614,17 @@ export function getRegisteredGroup(
       }
     | undefined;
   if (!row) return undefined;
-  if (!isValidGroupFolder(row.folder)) {
+  if (!isValidWorkspace(row.workspace)) {
     logger.warn(
-      { jid: row.jid, folder: row.folder },
-      'Skipping registered group with invalid folder',
+      { jid: row.jid, workspace: row.workspace },
+      'Skipping registered group with invalid workspace',
     );
     return undefined;
   }
   return {
     jid: row.jid,
     name: row.name,
-    folder: row.folder,
+    workspace: row.workspace,
     trigger: row.trigger_pattern,
     added_at: row.added_at,
     containerConfig: row.container_config
@@ -590,16 +638,16 @@ export function setRegisteredGroup(
   jid: string,
   group: RegisteredGroup,
 ): void {
-  if (!isValidGroupFolder(group.folder)) {
-    throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
+  if (!isValidWorkspace(group.workspace)) {
+    throw new Error(`Invalid workspace "${group.workspace}" for JID ${jid}`);
   }
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger)
+    `INSERT OR REPLACE INTO registered_groups (jid, name, workspace, trigger_pattern, added_at, container_config, requires_trigger)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
-    group.folder,
+    group.workspace,
     group.trigger,
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
@@ -613,7 +661,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     .all() as Array<{
     jid: string;
     name: string;
-    folder: string;
+    workspace: string;
     trigger_pattern: string;
     added_at: string;
     container_config: string | null;
@@ -621,16 +669,16 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
   }>;
   const result: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
-    if (!isValidGroupFolder(row.folder)) {
+    if (!isValidWorkspace(row.workspace)) {
       logger.warn(
-        { jid: row.jid, folder: row.folder },
-        'Skipping registered group with invalid folder',
+        { jid: row.jid, workspace: row.workspace },
+        'Skipping registered group with invalid workspace',
       );
       continue;
     }
     result[row.jid] = {
       name: row.name,
-      folder: row.folder,
+      workspace: row.workspace,
       trigger: row.trigger_pattern,
       added_at: row.added_at,
       containerConfig: row.container_config
@@ -640,6 +688,13 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+export function getJidsForWorkspace(workspace: string): string[] {
+  const rows = db
+    .prepare('SELECT jid FROM registered_groups WHERE workspace = ?')
+    .all(workspace) as Array<{ jid: string }>;
+  return rows.map((r) => r.jid);
 }
 
 // --- JSON migration ---
@@ -680,8 +735,8 @@ function migrateJsonState(): void {
     string
   > | null;
   if (sessions) {
-    for (const [folder, sessionId] of Object.entries(sessions)) {
-      setSession(folder, sessionId);
+    for (const [workspace, sessionId] of Object.entries(sessions)) {
+      setSession(workspace, sessionId);
     }
   }
 
@@ -696,8 +751,8 @@ function migrateJsonState(): void {
         setRegisteredGroup(jid, group);
       } catch (err) {
         logger.warn(
-          { jid, folder: group.folder, err },
-          'Skipping migrated registered group with invalid folder',
+          { jid, workspace: group.workspace, err },
+          'Skipping migrated registered group with invalid workspace',
         );
       }
     }

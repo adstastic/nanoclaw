@@ -107,7 +107,7 @@ function createTestOpts(overrides?: Partial<WhatsAppChannelOpts>): WhatsAppChann
     registeredGroups: vi.fn(() => ({
       'registered@g.us': {
         name: 'Test Group',
-        folder: 'test-group',
+        workspace: 'test-group',
         trigger: '@Andy',
         added_at: '2024-01-01T00:00:00.000Z',
       },
@@ -553,7 +553,7 @@ describe('WhatsAppChannel', () => {
         registeredGroups: vi.fn(() => ({
           '1234567890@s.whatsapp.net': {
             name: 'Self Chat',
-            folder: 'self-chat',
+            workspace: 'self-chat',
             trigger: '@Andy',
             added_at: '2024-01-01T00:00:00.000Z',
           },

@@ -5,7 +5,7 @@ import {
   ASSISTANT_NAME,
   DATA_DIR,
   IDLE_TIMEOUT,
-  MAIN_GROUP_FOLDER,
+  MAIN_WORKSPACE,
   POLL_INTERVAL,
   SIGNAL_API_URL,
   SIGNAL_PHONE_NUMBER,
@@ -52,7 +52,7 @@ let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
 const channels: Channel[] = [];
-const queue = new GroupQueue();
+const queue = new GroupQueue((jid) => registeredGroups[jid]?.workspace);
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -83,12 +83,12 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
 
-  // Create group folder
-  const groupDir = path.join(DATA_DIR, '..', 'groups', group.folder);
+  // Create group workspace directory
+  const groupDir = path.join(DATA_DIR, '..', 'groups', group.workspace);
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
 
   logger.info(
-    { jid, name: group.name, folder: group.folder },
+    { jid, name: group.name, workspace: group.workspace },
     'Group registered',
   );
 }
@@ -127,7 +127,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const channel = findChannel(channels, chatJid);
   if (!channel) return true;
 
-  const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
+  const isMainGroup = group.workspace === MAIN_WORKSPACE;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
   const missedMessages = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
@@ -146,7 +146,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const prompt = formatMessages(missedMessages);
 
   // Prepare image attachments for container (copies files to IPC dir)
-  const attachments = prepareAttachmentsForContainer(missedMessages, group.folder);
+  const attachments = prepareAttachmentsForContainer(missedMessages, group.workspace);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -239,17 +239,17 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
   attachments?: { containerPath: string; contentType: string }[],
 ): Promise<'success' | 'error'> {
-  const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  const isMain = group.workspace === MAIN_WORKSPACE;
+  const sessionId = sessions[group.workspace];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
   writeTasksSnapshot(
-    group.folder,
+    group.workspace,
     isMain,
     tasks.map((t) => ({
       id: t.id,
-      groupFolder: t.group_folder,
+      workspace: t.workspace,
       prompt: t.prompt,
       schedule_type: t.schedule_type,
       schedule_value: t.schedule_value,
@@ -261,7 +261,7 @@ async function runAgent(
   // Update available groups snapshot (main group only can see all groups)
   const availableGroups = getAvailableGroups();
   writeGroupsSnapshot(
-    group.folder,
+    group.workspace,
     isMain,
     availableGroups,
     new Set(Object.keys(registeredGroups)),
@@ -271,8 +271,8 @@ async function runAgent(
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          sessions[group.workspace] = output.newSessionId;
+          setSession(group.workspace, output.newSessionId);
         }
         await onOutput(output);
       }
@@ -284,19 +284,19 @@ async function runAgent(
       {
         prompt,
         sessionId,
-        groupFolder: group.folder,
+        workspace: group.workspace,
         chatJid,
         isMain,
         attachments: attachments?.length ? attachments : undefined,
         assistantName: ASSISTANT_NAME,
       },
-      (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
+      (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.workspace),
       wrappedOnOutput,
     );
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      sessions[group.workspace] = output.newSessionId;
+      setSession(group.workspace, output.newSessionId);
     }
 
     if (output.status === 'error') {
@@ -353,7 +353,7 @@ async function startMessageLoop(): Promise<void> {
           const channel = findChannel(channels, chatJid);
           if (!channel) continue;
 
-          const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
+          const isMainGroup = group.workspace === MAIN_WORKSPACE;
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
           // For non-main groups, only act on trigger messages.
@@ -379,7 +379,7 @@ async function startMessageLoop(): Promise<void> {
           const formatted = formatMessages(messagesToSend);
 
           // Prepare attachments for piped messages
-          const pipeAttachments = prepareAttachmentsForContainer(messagesToSend, group.folder);
+          const pipeAttachments = prepareAttachmentsForContainer(messagesToSend, group.workspace);
 
           if (queue.sendMessage(chatJid, formatted, pipeAttachments.length > 0 ? pipeAttachments : undefined)) {
             logger.debug(
@@ -538,7 +538,7 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
     queue,
-    onProcess: (groupJid, proc, containerName, groupFolder) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
+    onProcess: (groupJid, proc, containerName, workspace) => queue.registerProcess(groupJid, proc, containerName, workspace),
     sendMessage: async (jid, rawText) => {
       const channel = findChannel(channels, jid);
       if (!channel) return;

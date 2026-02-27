@@ -17,7 +17,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import { readEnvFile } from './env.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import { resolveWorkspacePath, resolveWorkspaceIpcPath } from './workspace.js';
 import { logger } from './logger.js';
 import { CONTAINER_RUNTIME_BIN, readonlyMountArgs, stopContainerArgs } from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
@@ -30,7 +30,7 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
-  groupFolder: string;
+  workspace: string;
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
@@ -58,7 +58,7 @@ function buildVolumeMounts(
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
-  const groupDir = resolveGroupFolderPath(group.folder);
+  const groupDir = resolveWorkspacePath(group.workspace);
 
   if (isMain) {
     // Main gets the project root read-only. Writable paths the agent needs
@@ -103,7 +103,7 @@ function buildVolumeMounts(
   const groupSessionsDir = path.join(
     DATA_DIR,
     'sessions',
-    group.folder,
+    group.workspace,
     '.claude',
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
@@ -143,7 +143,7 @@ function buildVolumeMounts(
 
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
-  const groupIpcDir = resolveGroupIpcPath(group.folder);
+  const groupIpcDir = resolveWorkspaceIpcPath(group.workspace);
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
@@ -190,10 +190,10 @@ function buildVolumeMounts(
  *
  * Only keys listed in `keys` can be overridden. Group .env files cannot introduce new env vars.
  */
-export function readSecrets(groupFolder: string): Record<string, string> {
+export function readSecrets(workspace: string): Record<string, string> {
   const keys = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'GH_TOKEN'];
   const global = readEnvFile(keys);
-  const groupEnvFile = path.join(GROUPS_DIR, groupFolder, '.env');
+  const groupEnvFile = path.join(GROUPS_DIR, workspace, '.env');
   let groupOverrides: Record<string, string> = {};
   try {
     const content = fs.readFileSync(groupEnvFile, 'utf-8');
@@ -258,11 +258,11 @@ export async function runContainerAgent(
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
-  const groupDir = resolveGroupFolderPath(group.folder);
+  const groupDir = resolveWorkspacePath(group.workspace);
   fs.mkdirSync(groupDir, { recursive: true });
 
   const mounts = buildVolumeMounts(group, input.isMain);
-  const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
+  const safeName = group.workspace.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName, group.containerConfig?.memory);
 
@@ -305,7 +305,7 @@ export async function runContainerAgent(
     let stderrTruncated = false;
 
     // Pass secrets via stdin (never written to disk or mounted as files)
-    input.secrets = readSecrets(group.folder);
+    input.secrets = readSecrets(group.workspace);
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
     // Remove secrets from input so they don't appear in logs
@@ -372,7 +372,7 @@ export async function runContainerAgent(
       const chunk = data.toString();
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
-        if (line) logger.debug({ container: group.folder }, line);
+        if (line) logger.debug({ container: group.workspace }, line);
       }
       // Don't reset timeout on stderr — SDK writes debug logs continuously.
       // Timeout only resets on actual output (OUTPUT_MARKER in stdout).
@@ -637,9 +637,9 @@ export async function runContainerAgent(
  */
 export function prepareAttachmentsForContainer(
   messages: NewMessage[],
-  groupFolder: string,
+  workspace: string,
 ): { containerPath: string; contentType: string }[] {
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+  const groupIpcDir = resolveWorkspaceIpcPath(workspace);
   const ipcAttachmentsDir = path.join(groupIpcDir, 'attachments');
   const result: { containerPath: string; contentType: string }[] = [];
 
@@ -663,11 +663,11 @@ export function prepareAttachmentsForContainer(
 }
 
 export function writeTasksSnapshot(
-  groupFolder: string,
+  workspace: string,
   isMain: boolean,
   tasks: Array<{
     id: string;
-    groupFolder: string;
+    workspace: string;
     prompt: string;
     schedule_type: string;
     schedule_value: string;
@@ -676,13 +676,13 @@ export function writeTasksSnapshot(
   }>,
 ): void {
   // Write filtered tasks to the group's IPC directory
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+  const groupIpcDir = resolveWorkspaceIpcPath(workspace);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
   // Main sees all tasks, others only see their own
   const filteredTasks = isMain
     ? tasks
-    : tasks.filter((t) => t.groupFolder === groupFolder);
+    : tasks.filter((t) => t.workspace === workspace);
 
   const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
   fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
@@ -701,12 +701,12 @@ export interface AvailableGroup {
  * Non-main groups only see their own registration status.
  */
 export function writeGroupsSnapshot(
-  groupFolder: string,
+  workspace: string,
   isMain: boolean,
   groups: AvailableGroup[],
   registeredJids: Set<string>,
 ): void {
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+  const groupIpcDir = resolveWorkspaceIpcPath(workspace);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
   // Main sees all groups; others see nothing (they can't activate groups)

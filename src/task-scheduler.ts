@@ -5,7 +5,7 @@ import fs from 'fs';
 import {
   ASSISTANT_NAME,
   IDLE_TIMEOUT,
-  MAIN_GROUP_FOLDER,
+  MAIN_WORKSPACE,
   SCHEDULER_POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
@@ -19,7 +19,7 @@ import {
   updateTaskAfterRun,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
+import { resolveWorkspacePath } from './workspace.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
@@ -27,7 +27,7 @@ export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
   queue: GroupQueue;
-  onProcess: (groupJid: string, proc: ChildProcess, containerName: string, groupFolder: string) => void;
+  onProcess: (groupJid: string, proc: ChildProcess, containerName: string, workspace: string) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
 }
 
@@ -38,14 +38,14 @@ async function runTask(
   const startTime = Date.now();
   let groupDir: string;
   try {
-    groupDir = resolveGroupFolderPath(task.group_folder);
+    groupDir = resolveWorkspacePath(task.workspace);
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     // Stop retry churn for malformed legacy rows.
     updateTask(task.id, { status: 'paused' });
     logger.error(
-      { taskId: task.id, groupFolder: task.group_folder, error },
-      'Task has invalid group folder',
+      { taskId: task.id, workspace: task.workspace, error },
+      'Task has invalid workspace',
     );
     logTaskRun({
       task_id: task.id,
@@ -60,18 +60,18 @@ async function runTask(
   fs.mkdirSync(groupDir, { recursive: true });
 
   logger.info(
-    { taskId: task.id, group: task.group_folder },
+    { taskId: task.id, group: task.workspace },
     'Running scheduled task',
   );
 
   const groups = deps.registeredGroups();
   const group = Object.values(groups).find(
-    (g) => g.folder === task.group_folder,
+    (g) => g.workspace === task.workspace,
   );
 
   if (!group) {
     logger.error(
-      { taskId: task.id, groupFolder: task.group_folder },
+      { taskId: task.id, workspace: task.workspace },
       'Group not found for task',
     );
     logTaskRun({
@@ -80,20 +80,20 @@ async function runTask(
       duration_ms: Date.now() - startTime,
       status: 'error',
       result: null,
-      error: `Group not found: ${task.group_folder}`,
+      error: `Group not found: ${task.workspace}`,
     });
     return;
   }
 
   // Update tasks snapshot for container to read (filtered by group)
-  const isMain = task.group_folder === MAIN_GROUP_FOLDER;
+  const isMain = task.workspace === MAIN_WORKSPACE;
   const tasks = getAllTasks();
   writeTasksSnapshot(
-    task.group_folder,
+    task.workspace,
     isMain,
     tasks.map((t) => ({
       id: t.id,
-      groupFolder: t.group_folder,
+      workspace: t.workspace,
       prompt: t.prompt,
       schedule_type: t.schedule_type,
       schedule_value: t.schedule_value,
@@ -108,7 +108,7 @@ async function runTask(
   // For group context mode, use the group's current session
   const sessions = deps.getSessions();
   const sessionId =
-    task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
+    task.context_mode === 'group' ? sessions[task.workspace] : undefined;
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
@@ -130,13 +130,13 @@ async function runTask(
       {
         prompt: task.prompt,
         sessionId,
-        groupFolder: task.group_folder,
+        workspace: task.workspace,
         chatJid: task.chat_jid,
         isMain,
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
       },
-      (proc, containerName) => deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
+      (proc, containerName) => deps.onProcess(task.chat_jid, proc, containerName, task.workspace),
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;

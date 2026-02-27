@@ -262,7 +262,7 @@ describe('GroupQueue', () => {
     queue.enqueueMessageCheck('group1@g.us');
     await vi.advanceTimersByTimeAsync(10);
 
-    // Register a process so closeStdin has a groupFolder
+    // Register a process so closeStdin has a workspace
     queue.registerProcess('group1@g.us', {} as any, 'container-1', 'test-group');
 
     // Enqueue a task while container is active but NOT idle
@@ -420,5 +420,110 @@ describe('GroupQueue', () => {
 
     resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
+  });
+
+  // --- Shared-folder (many-to-one) ---
+
+  describe('shared folder routing', () => {
+    it('two JIDs sharing a folder use a single container', async () => {
+      let concurrentCount = 0;
+      let maxConcurrent = 0;
+      const processedJids: string[] = [];
+
+      const resolver = (jid: string) => {
+        if (jid === 'jid-a' || jid === 'jid-b') return 'shared-folder';
+        return jid;
+      };
+      const q = new GroupQueue(resolver);
+
+      const completionCallbacks: Array<() => void> = [];
+      q.setProcessMessagesFn(async (groupJid) => {
+        processedJids.push(groupJid);
+        concurrentCount++;
+        maxConcurrent = Math.max(maxConcurrent, concurrentCount);
+        await new Promise<void>((resolve) => completionCallbacks.push(resolve));
+        concurrentCount--;
+        return true;
+      });
+
+      // Enqueue for both JIDs sharing the same folder
+      q.enqueueMessageCheck('jid-a');
+      q.enqueueMessageCheck('jid-b');
+
+      await vi.advanceTimersByTimeAsync(10);
+
+      // Only one container should have started (for the first JID)
+      expect(maxConcurrent).toBe(1);
+      expect(processedJids).toEqual(['jid-a']);
+
+      // Complete the first — second should drain
+      completionCallbacks[0]();
+      await vi.advanceTimersByTimeAsync(10);
+
+      // The drain should have called processMessagesFn with the last trigger JID
+      expect(processedJids).toHaveLength(2);
+      expect(processedJids[1]).toBe('jid-b');
+      expect(maxConcurrent).toBe(1); // still only one at a time
+    });
+
+    it('sendMessage via alternate JID reaches active container', async () => {
+      const resolver = (jid: string) => {
+        if (jid === 'jid-a' || jid === 'jid-b') return 'shared-folder';
+        return jid;
+      };
+      const q = new GroupQueue(resolver);
+
+      let resolveProcess: () => void;
+      q.setProcessMessagesFn(async () => {
+        await new Promise<void>((resolve) => {
+          resolveProcess = resolve;
+        });
+        return true;
+      });
+
+      // Start container via jid-a
+      q.enqueueMessageCheck('jid-a');
+      await vi.advanceTimersByTimeAsync(10);
+      q.registerProcess('jid-a', {} as any, 'container-1', 'shared-folder');
+
+      // Send message via jid-b — should find the active container via folder resolution
+      const result = q.sendMessage('jid-b', 'hello from jid-b');
+      expect(result).toBe(true);
+
+      resolveProcess!();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+
+    it('different folders still get separate containers', async () => {
+      let activeCount = 0;
+      let maxActive = 0;
+
+      const resolver = (jid: string) => {
+        if (jid === 'jid-a') return 'folder-a';
+        if (jid === 'jid-b') return 'folder-b';
+        return jid;
+      };
+      const q = new GroupQueue(resolver);
+
+      const completionCallbacks: Array<() => void> = [];
+      q.setProcessMessagesFn(async () => {
+        activeCount++;
+        maxActive = Math.max(maxActive, activeCount);
+        await new Promise<void>((resolve) => completionCallbacks.push(resolve));
+        activeCount--;
+        return true;
+      });
+
+      q.enqueueMessageCheck('jid-a');
+      q.enqueueMessageCheck('jid-b');
+      await vi.advanceTimersByTimeAsync(10);
+
+      // Both should run concurrently (different folders)
+      expect(maxActive).toBe(2);
+
+      completionCallbacks[0]();
+      completionCallbacks[1]();
+      await vi.advanceTimersByTimeAsync(10);
+    });
   });
 });
