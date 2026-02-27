@@ -5,7 +5,9 @@
 
 FROM eclipse-temurin:25-jdk AS builder
 RUN apt-get update && apt-get install -y git
-RUN git clone --depth 1 https://github.com/AsamK/signal-cli.git /build
+ARG SIGNAL_CLI_COMMIT=f9cbfa6d6c92291b54a31743a68d913dd819a4cb
+RUN git clone https://github.com/AsamK/signal-cli.git /build && \
+    cd /build && git checkout $SIGNAL_CLI_COMMIT
 WORKDIR /build
 RUN ./gradlew installDist
 

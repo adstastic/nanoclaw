@@ -431,12 +431,10 @@ function recoverPendingMessages(): void {
         'Recovery: skipping stale messages older than 5 minutes',
       );
       // Advance cursor past stale messages so they're never reprocessed
-      if (pending.length > 0) {
-        const lastStale = pending[pending.length - 1];
-        if (recent.length === 0) {
-          lastAgentTimestamp[chatJid] = lastStale.timestamp;
-          saveState();
-        }
+      const stale = pending.filter((m) => m.timestamp < cutoff);
+      if (stale.length > 0) {
+        lastAgentTimestamp[chatJid] = stale[stale.length - 1].timestamp;
+        saveState();
       }
     }
 
