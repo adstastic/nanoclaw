@@ -1,0 +1,49 @@
+name: Check signal-cli releases
+
+on:
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for new signal-cli release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          KNOWN_BROKEN="0.13.24"
+          LATEST=$(gh api repos/AsamK/signal-cli/releases/latest --jq '.tag_name' | sed 's/^v//')
+
+          echo "Latest release: $LATEST"
+          echo "Known broken: $KNOWN_BROKEN"
+
+          if [ "$LATEST" = "$KNOWN_BROKEN" ]; then
+            echo "No new release yet."
+            exit 0
+          fi
+
+          # Check if an open issue already exists
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --label signal-cli-update --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "Open issue #$EXISTING already exists, skipping."
+            exit 0
+          fi
+
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "signal-cli $LATEST released — evaluate switching back to stock image" \
+            --label signal-cli-update \
+            --body "$(cat <<EOF
+          signal-cli **$LATEST** has been released (previously on $KNOWN_BROKEN).
+
+          We're currently building signal-cli from master (pinned to \`f9cbfa6d\`) because ≤$KNOWN_BROKEN doesn't handle Signal Desktop's binary ACI encoding. See [signal-cli#1940](https://github.com/AsamK/signal-cli/issues/1940).
+
+          ### Action items
+
+          - [ ] Check the [release notes](https://github.com/AsamK/signal-cli/releases/tag/v$LATEST) for the binary ACI fix (\`signal-service-java v2.15.3_unofficial_138\` or later)
+          - [ ] If fixed, switch back to stock \`bbernhard/signal-cli-rest-api\` and unpin the commit
+          - [ ] Remove custom signal-api build (\`container/signal-api/\`)
+          - [ ] Update MEMORY.md to reflect the change
+          EOF
+          )"
