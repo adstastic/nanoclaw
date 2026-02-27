@@ -38,6 +38,7 @@ export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
   memory?: string; // Container memory limit, e.g. '4GiB'. Default: '4GiB'
+  recoveryAge?: number; // Max age (seconds) of messages to recover after downtime. Default: 86400 (1 day)
 }
 
 export interface RegisteredGroup {

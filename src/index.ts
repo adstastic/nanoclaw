@@ -415,14 +415,17 @@ async function startMessageLoop(): Promise<void> {
 /**
  * Startup recovery: check for unprocessed messages in registered groups.
  * Handles crash between advancing lastAgentTimestamp and processing messages.
- * Messages older than 5 minutes are considered stale and dropped — the cursor
- * is advanced past them to prevent reprocessing after prolonged downtime.
+ * Messages older than the recovery age are considered stale and dropped — the
+ * cursor is advanced past them to prevent spamming users after prolonged downtime.
+ * Recovery age is configurable per group via containerConfig.recoveryAge (seconds).
  */
 function recoverPendingMessages(): void {
-  const MAX_RECOVERY_AGE_MS = 5 * 60 * 1000;
-  const cutoff = new Date(Date.now() - MAX_RECOVERY_AGE_MS).toISOString();
+  const DEFAULT_RECOVERY_AGE_S = 86400; // 1 day
 
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
+    const recoveryAgeMs = (group.containerConfig?.recoveryAge ?? DEFAULT_RECOVERY_AGE_S) * 1000;
+    const cutoff = new Date(Date.now() - recoveryAgeMs).toISOString();
+
     const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
     const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
     const recent = pending.filter((m) => m.timestamp >= cutoff);
@@ -435,7 +438,8 @@ function recoverPendingMessages(): void {
           skipped: stale.length,
           dropped: stale.map((m) => ({ id: m.id, sender: m.sender_name, ts: m.timestamp })),
         },
-        'Recovery: dropping stale messages older than 5 minutes',
+        'Recovery: dropping stale messages older than %ds',
+        recoveryAgeMs / 1000,
       );
       // Advance cursor past stale messages so they're never reprocessed
       if (stale.length > 0) {
